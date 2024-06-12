@@ -4,7 +4,10 @@ using System.Collections.ObjectModel;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Net.Mail;
+using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using SenseNet.Configuration;
 using SenseNet.ContentRepository.Storage;
@@ -90,40 +93,13 @@ namespace SenseNet.ContentRepository.Sharing
             _items = null;
         }
 
-        private const string SharingNotificationFormatterKey = "SharingNotificationFormatter";
-        private static readonly object FormatterSync = new object();
-
         /// <summary>
-        /// Gets or sets the provider responsible for formatting sharing notification
+        /// Gets the provider responsible for formatting sharing notification
         /// email subject and body. Developers may customize the values and variables
         /// available in these texts.
         /// </summary>
-        internal static ISharingNotificationFormatter NotificationFormatter
-        {
-            get
-            {
-                ISharingNotificationFormatter formatter;
-
-                // ReSharper disable once InconsistentlySynchronizedField
-                if ((formatter = Providers.Instance.GetProvider<ISharingNotificationFormatter>(
-                        SharingNotificationFormatterKey)) != null)
-                    return formatter;
-
-                lock (FormatterSync)
-                {
-                    if ((formatter = Providers.Instance.GetProvider<ISharingNotificationFormatter>(
-                            SharingNotificationFormatterKey)) != null)
-                        return formatter;
-
-                    // default implementation
-                    formatter = new DefaultSharingNotificationFormatter();
-                    Providers.Instance.SetProvider(SharingNotificationFormatterKey, formatter);
-                }
-
-                return formatter;
-            }
-            set => Providers.Instance.SetProvider(SharingNotificationFormatterKey, value);
-        }
+        internal static ISharingNotificationFormatter NotificationFormatter =>
+            Providers.Instance.Services.GetService<ISharingNotificationFormatter>();
 
         private readonly GenericContent _owner;
         internal SharingHandler(GenericContent owner)
@@ -163,7 +139,7 @@ namespace SenseNet.ContentRepository.Sharing
         {
             // do not reset the item list because we already have it up-todate
             _owner.SetSharingData(Serialize(_items), false);
-            _owner.Save(SavingMode.KeepVersion);
+            _owner.SaveAsync(SavingMode.KeepVersion, CancellationToken.None).GetAwaiter().GetResult();
 
             _owner.SetCachedData(SharingItemsCacheKey, _items);
         }
@@ -260,7 +236,8 @@ namespace SenseNet.ContentRepository.Sharing
                     {
                         var sharingGroup = Node.LoadNode(sharingData.Identity) as Group;
                         if (sharingGroup?.NodeType.IsInstaceOfOrDerivedFrom(Constants.SharingGroupTypeName) ?? false)
-                            sharingGroup.ForceDelete();
+                            sharingGroup.ForceDeleteAsync(CancellationToken.None)
+                                .ConfigureAwait(false).GetAwaiter().GetResult();
                     }
                 }
             }
@@ -311,8 +288,8 @@ namespace SenseNet.ContentRepository.Sharing
             if (token.Contains("@"))
             {
                 var userId = SystemAccount.Execute(() =>
-                    ContentQuery.Query(SharingQueries.UsersByEmail, QuerySettings.AdminSettings, token).Identifiers
-                        .FirstOrDefault());
+                    ContentQuery.QueryAsync(SharingQueries.UsersByEmail, QuerySettings.AdminSettings, CancellationToken.None, token)
+                        .ConfigureAwait(false).GetAwaiter().GetResult().Identifiers.FirstOrDefault());
 
                 if (userId > 0)
                     return userId;
@@ -361,7 +338,7 @@ namespace SenseNet.ContentRepository.Sharing
                     group[Constants.SharingIdsFieldName] = id?.Replace("-", string.Empty);
                     group[Constants.SharedContentFieldName] = _owner;
                     group[Constants.SharingLevelValueFieldName] = level.ToString();
-                    group.Save();
+                    group.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                 }, (i, e) =>
                 {
                     switch (e)
@@ -381,7 +358,7 @@ namespace SenseNet.ContentRepository.Sharing
             {
                 // set sharing id on the group if it is not there yet
                 group[Constants.SharingIdsFieldName] = AddSharingIdToText((string)group[Constants.SharingIdsFieldName], id);
-                group.SaveSameVersion();
+                group.SaveSameVersionAsync(CancellationToken.None).GetAwaiter().GetResult();
             }
 
             return group.ContentHandler as Group;
@@ -395,7 +372,7 @@ namespace SenseNet.ContentRepository.Sharing
                 Retrier.Retry(3, 300, () =>
                 {
                     var content = Content.CreateNew(contentTypeName, Node.LoadNode(parentPath), name);
-                    content.Save();
+                    content.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                     container = content.ContentHandler;
                 }, (i, ex) =>
                 {
@@ -417,6 +394,8 @@ namespace SenseNet.ContentRepository.Sharing
         }
         
         /* ================================================================================== Permissions */
+        
+        private SecurityHandler SecurityHandler => Providers.Instance.SecurityHandler;
 
         private void SetPermissions(SharingData sharingData)
         {
@@ -424,9 +403,9 @@ namespace SenseNet.ContentRepository.Sharing
                 return;
 
             var mask = GetEffectiveBitmask(sharingData.Level);
-            SnSecurityContext.Create().CreateAclEditor(EntryType.Sharing)
+            SecurityHandler.SecurityContext.CreateSnAclEditor(EntryType.Sharing)
                 .Set(_owner.Id, sharingData.Identity, false, mask, 0ul)
-                .Apply();
+                .ApplyAsync(CancellationToken.None).GetAwaiter().GetResult();
         }
 
         /// <summary>
@@ -434,7 +413,7 @@ namespace SenseNet.ContentRepository.Sharing
         /// </summary>
         internal void UpdatePermissions()
         {
-            var aclEditor = SnSecurityContext.Create().CreateAclEditor(EntryType.Sharing);
+            var aclEditor = SecurityHandler.SecurityContext.CreateSnAclEditor(EntryType.Sharing);
             var currentEntries = GetExplicitSharingEntries();
 
             // first remove all existing entries
@@ -452,7 +431,7 @@ namespace SenseNet.ContentRepository.Sharing
                 aclEditor.Set(_owner.Id, identity, false, mask, 0ul);
             }
 
-            aclEditor.Apply();
+            aclEditor.ApplyAsync(CancellationToken.None).GetAwaiter().GetResult();
         }
         private void UpdatePermissions(int identityId, SharingData[] remainData)
         {
@@ -465,10 +444,10 @@ namespace SenseNet.ContentRepository.Sharing
 
             var mask = remainData.Aggregate(0ul, (current, item) => current | GetEffectiveBitmask(item.Level));
 
-            SnSecurityContext.Create().CreateAclEditor(EntryType.Sharing)
+            Providers.Instance.SecurityHandler.SecurityContext.CreateSnAclEditor(EntryType.Sharing)
                 .Reset(nodeId, identityId, false, ulong.MaxValue, 0ul)
                 .Set(nodeId, identityId, false, mask, 0ul)
-                .Apply();
+                .ApplyAsync(CancellationToken.None).GetAwaiter().GetResult();
 
         }
 
@@ -653,8 +632,21 @@ namespace SenseNet.ContentRepository.Sharing
             // and add user id and set permissions for this user on the content.
 
             // Collect all content that has been shared with the email of this user.
-            var results = ContentQuery.Query(SharingQueries.PrivatelySharedWithNoIdentityByEmail,
-                QuerySettings.AdminSettings, user.Email);
+            if (!Providers.Instance.SearchManager.ContentQueryIsAllowed)
+            {
+                var logger = Providers.Instance.Services.GetService<ILogger<SharingHandler>>();
+                var message = $"Cannot query shared content for the email '{user.Email}' because the ContentQuery is not allowed.";
+                if (logger != null)
+                    logger.LogWarning(message);
+                else
+                    SnTrace.Query.Write("WARNING: " + message);
+                return;
+            }
+            var results = !Providers.Instance.SearchManager.ContentQueryIsAllowed
+                ? QueryResult.Empty
+                : ContentQuery.QueryAsync(SharingQueries.PrivatelySharedWithNoIdentityByEmail,
+                        QuerySettings.AdminSettings, CancellationToken.None, user.Email)
+                    .ConfigureAwait(false).GetAwaiter().GetResult();
 
             ProcessContentWithRetry(results.Nodes, gc =>
             {
@@ -673,7 +665,7 @@ namespace SenseNet.ContentRepository.Sharing
                 });
 
                 content.SharingData = Serialize(newItems);
-                content.Save(SavingMode.KeepVersion);
+                content.SaveAsync(SavingMode.KeepVersion, CancellationToken.None).GetAwaiter().GetResult();
 
                 // set permissions for the user
                 if (changed)
@@ -702,8 +694,8 @@ namespace SenseNet.ContentRepository.Sharing
             using (new SystemAccount())
             {
                 // collect all content that has been shared with these identities
-                var results = ContentQuery.Query(SharingQueries.ContentBySharedWith,
-                    QuerySettings.AdminSettings, ids.Concat(emails).ToArray());
+                var results = ContentQuery.QueryAsync(SharingQueries.ContentBySharedWith, QuerySettings.AdminSettings,
+                    CancellationToken.None, ids.Concat(emails).ToArray()).ConfigureAwait(false).GetAwaiter().GetResult();
 
                 ProcessContentWithRetry(results.Nodes,
                     gc =>
@@ -726,15 +718,15 @@ namespace SenseNet.ContentRepository.Sharing
                 return new int[0];
 
             // collect all content ids that were shared publicly in this subtree
-            var publicSharedIds = ContentQuery.Query(SharingQueries.PubliclySharedInTree, 
-                    QuerySettings.AdminSettings, rootContent.Path).Identifiers.ToArray();
+            var publicSharedIds = ContentQuery.QueryAsync(SharingQueries.PubliclySharedInTree, QuerySettings.AdminSettings,
+                CancellationToken.None, rootContent.Path).ConfigureAwait(false).GetAwaiter().GetResult().Identifiers.ToArray();
 
             if (!publicSharedIds.Any())
                 return new int[0];
 
             // collect all group ids that will become orphanes
-            return ContentQuery.Query(SharingQueries.SharingGroupsBySharedContent,
-                QuerySettings.AdminSettings, publicSharedIds).Identifiers.ToArray();
+            return ContentQuery.QueryAsync(SharingQueries.SharingGroupsBySharedContent, QuerySettings.AdminSettings,
+                CancellationToken.None, publicSharedIds).ConfigureAwait(false).GetAwaiter().GetResult().Identifiers.ToArray();
         }
 
         /* ================================================================================== Helper methods */

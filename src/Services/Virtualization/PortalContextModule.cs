@@ -75,7 +75,7 @@ namespace SenseNet.Portal.Virtualization
 
             var initInfo = PortalContext.CreateInitInfo(httpContext);
 
-            // Check for forbidden paths (custom request filtering), mainly for phisycal folders in the web folder. 
+            // Check for forbidden paths (custom request filtering), mainly for physical folders in the web folder. 
             // The built-in Request filtering module is not capable of filtering folders only in the root, but let
             // us have folders with the same name somewhere else in the Content Repository.
             if (IsForbiddenFolder(initInfo))
@@ -493,7 +493,7 @@ namespace SenseNet.Portal.Virtualization
             var delayingRequestsNecessary = requestsCurrentlyDelayed;
 
             // check if we need to switch off/on delaying
-            var incomingMessageCount = DistributedApplication.ClusterChannel.IncomingMessageCount;
+            var incomingMessageCount = SenseNet.Configuration.Providers.Instance.ClusterChannelProvider.IncomingMessageCount;
             if (!requestsCurrentlyDelayed && incomingMessageCount > Configuration.Messaging.DelayRequestsOnHighMessageCountUpperLimit)
             {
                 delayingRequestsNecessary = true;

@@ -5,15 +5,14 @@ using System.Text;
 using System.Threading;
 using SenseNet.ContentRepository;
 using SenseNet.ContentRepository.Storage;
-using SenseNet.ContentRepository.Storage.Schema;
-using SenseNet.ContentRepository.Storage.Search;
-using SenseNet.ContentRepository.Storage.Events;
 using SenseNet.Diagnostics;
 using SenseNet.ContentRepository.Storage.Security;
 using SenseNet.Communication.Messaging;
 using System.Diagnostics;
+using SenseNet.Configuration;
 using SenseNet.Search;
 using SafeQueries = SenseNet.ContentRepository.SafeQueries;
+using Task = System.Threading.Tasks.Task;
 
 namespace SenseNet.ApplicationModel
 {
@@ -54,7 +53,7 @@ namespace SenseNet.ApplicationModel
                         // remove current word and insert words of type path
                         if (word != "This")
                         {
-                            var ntype = ActiveSchema.NodeTypes[word];
+                            var ntype = Providers.Instance.StorageSchema.NodeTypes[word];
                             if (ntype == null)
                                 return null;
                             var typeNames = ntype.NodeTypePath.Split('/');
@@ -122,7 +121,7 @@ namespace SenseNet.ApplicationModel
                 }
                 typeIndex = result.Count;
 
-                var ntype = ActiveSchema.NodeTypes.GetItemById(head.NodeTypeId);
+                var ntype = Providers.Instance.StorageSchema.NodeTypes.GetItemById(head.NodeTypeId);
                 var typeNames = ntype.NodeTypePath.Split('/');
                 foreach (var typeName in typeNames)
                 {
@@ -305,7 +304,8 @@ namespace SenseNet.ApplicationModel
             using (new SystemAccount())
             {
                 //var result = nq.Execute();
-                var result = ContentQuery.Query(SafeQueries.TypeIs, QuerySettings.AdminSettings, typeof(Application).Name);
+                var result = ContentQuery.QueryAsync(SafeQueries.TypeIs, QuerySettings.AdminSettings, CancellationToken.None, typeof(Application).Name)
+                    .ConfigureAwait(false).GetAwaiter().GetResult();
                 appList = result.Nodes.Cast<Application>().ToList();
                 appList.Sort((xa, ya) => xa.Path.CompareTo(ya.Path));
             }
@@ -343,7 +343,7 @@ namespace SenseNet.ApplicationModel
                         // STARTUP user that cannot be used to save any content.
                         AccessProvider.Current.SetCurrentUser(User.Administrator);
 
-                        node.Save(SavingMode.KeepVersion);
+                        node.SaveAsync(SavingMode.KeepVersion, CancellationToken.None).GetAwaiter().GetResult();
                         appName = node.AppName;
                     }
                     finally
@@ -772,17 +772,20 @@ namespace SenseNet.ApplicationModel
         [Serializable]
         internal class ApplicationStorageInvalidateDistributedAction : DistributedAction
         {
-            public override void DoAction(bool onRemote, bool isFromMe)
+            public override string TraceMessage => null;
+
+            public override Task DoActionAsync(bool onRemote, bool isFromMe, CancellationToken cancellationToken)
             {
                 if (onRemote && isFromMe)
-                    return;
+                    return Task.CompletedTask;
                 ApplicationStorage.InvalidatePrivate();
+                return Task.CompletedTask;
             }
         }
 
         private static void DistributedInvalidate()
         {
-            new ApplicationStorageInvalidateDistributedAction().Execute();
+            new ApplicationStorageInvalidateDistributedAction().ExecuteAsync(CancellationToken.None).GetAwaiter().GetResult();
         }
 
         private static void InvalidatePrivate()

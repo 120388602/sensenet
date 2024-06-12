@@ -6,8 +6,11 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using SenseNet.Configuration;
 using SenseNet.ContentRepository.Search;
+using SenseNet.ContentRepository.Search.Indexing;
 using SenseNet.ContentRepository.Search.Querying;
 using SenseNet.ContentRepository.Storage.Data;
 using SenseNet.ContentRepository.Storage.Schema;
@@ -15,13 +18,24 @@ using SenseNet.ContentRepository.Storage.Search;
 using SenseNet.ContentRepository.Storage.Security;
 using SenseNet.ContentRepository.Storage.Events;
 using SenseNet.ContentRepository.Storage.Caching.Dependency;
+using SenseNet.ContentRepository.Storage.Data.MsSqlClient;
 using SenseNet.Diagnostics;
+using SenseNet.Events;
 using SenseNet.Search;
+using SenseNet.Search.Indexing;
 using SenseNet.Search.Querying;
 using SenseNet.Security;
+// ReSharper disable ArrangeThisQualifier
 
 namespace SenseNet.ContentRepository.Storage
 {
+    public interface INode
+    {
+        public int Id { get; }
+        public int ParentId { get; }
+        public string Path { get; }
+    }
+
     /// <summary>
     /// Represents the method that will handle the revocable events of a <see cref="Node"/>.
     /// </summary>
@@ -89,10 +103,15 @@ namespace SenseNet.ContentRepository.Storage
     /// }
     /// </code></example>
     [DebuggerDisplay("Id={Id}, Name={Name}, Version={Version}, Path={Path}")]
-    public abstract class Node : IPasswordSaltProvider
+    public abstract class Node : INode, IPasswordSaltProvider
     {
         private NodeData _data;
         internal NodeData Data => _data;
+        private IDataStore DataStore => Providers.Instance.DataStore;
+        private StorageSchema StorageSchema => Providers.Instance.StorageSchema;
+
+        private List<INodeOperationValidator> NodeOperationValidators =>
+            Providers.Instance.GetProvider<List<INodeOperationValidator>>("NodeOperationValidators");
 
         private void SetNodeData(NodeData nodeData)
         {
@@ -143,20 +162,34 @@ namespace SenseNet.ContentRepository.Storage
         /// </summary>
         public string NodeOperation { get; set; } 
 
-        private SecurityHandler _security;
+        private NodeSecurity _security;
         private LockHandler _lockHandler;
         /// <summary>
         /// Gets true if the current user has only See permission for this <see cref="Node"/>.
         /// </summary>
         public bool IsHeadOnly { get; private set; }
+
         /// <summary>
         /// Gets true if the current user has only Preview permission for this <see cref="Node"/>.
         /// </summary>
         public bool IsPreviewOnly { get; private set; }
 
         /// <summary>
+        /// Gets a boolean value that specifies whether the preview of this content is enabled or not.
+        /// </summary>
+        public virtual bool IsPreviewEnabled
+        {
+            get
+            {
+                AssertSeeOnly(PropertyType.GetByName("PreviewEnabled"));
+                using (new SystemAccount())
+                    return Parent?.IsPreviewEnabled ?? false;
+            }
+        }
+
+        /// <summary>
         /// Gets a value that states if indexing is enabled for this content item. By default this is true
-        /// but can be overidden in derived classes. Determines whether an indexing activity and index
+        /// but can be overridden in derived classes. Determines whether an indexing activity and index
         /// document will be created for this content.
         /// </summary>
         protected internal virtual bool IsIndexingEnabled => true;
@@ -204,12 +237,13 @@ namespace SenseNet.ContentRepository.Storage
         /// </summary>
         protected virtual IEnumerable<Node> GetChildren()
         {
-            var nodeHeads = DataBackingStore.GetNodeHeads(QueryChildren().Identifiers);
+            var nodeHeads = DataStore.LoadNodeHeadsAsync(QueryChildren().Identifiers, CancellationToken.None)
+                .GetAwaiter().GetResult();
             var user = AccessProvider.Current.GetCurrentUser();
 
             // use loop here instead of LoadNodes to check permissions
             return new NodeList<Node>((from nodeHead in nodeHeads
-                                       where nodeHead != null && SecurityHandler.HasPermission(user, nodeHead, PermissionType.See)
+                                       where nodeHead != null && Providers.Instance.SecurityHandler.HasPermission(user, nodeHead, PermissionType.See)
                                        select nodeHead.Id));
         }
         /// <summary>
@@ -230,7 +264,7 @@ namespace SenseNet.ContentRepository.Storage
         /// <summary>
         /// Returns the count of <see cref="Node"/>s in the subtree.
         /// </summary>
-        public virtual int NodesInTree => SearchManager.ExecuteContentQuery(
+        public virtual int NodesInTree => Providers.Instance.SearchManager.ExecuteContentQuery(
                 "+InTree:@0",
                 QuerySettings.AdminSettings,
                 this.Path)
@@ -282,7 +316,7 @@ namespace SenseNet.ContentRepository.Storage
         /// </summary>
         public virtual NodeType NodeType
         {
-            get { return NodeTypeManager.Current.NodeTypes.GetItemById(_data.NodeTypeId); }
+            get { return StorageSchema.NodeTypes.GetItemById(_data.NodeTypeId); }
         }
         /// <summary>
         /// Gets the nearest <see cref="ContentListType"/> on the ancestor chain.
@@ -293,7 +327,7 @@ namespace SenseNet.ContentRepository.Storage
             {
                 if (_data.ContentListTypeId == 0)
                     return null;
-                return NodeTypeManager.Current.ContentListTypes.GetItemById(_data.ContentListTypeId);
+                return StorageSchema.ContentListTypes.GetItemById(_data.ContentListTypeId);
             }
             internal set
             {
@@ -381,7 +415,7 @@ namespace SenseNet.ContentRepository.Storage
         {
             get
             {
-                if (_data.ParentId == 0)
+                if (_data == null || _data.ParentId == 0)
                     return null;
                 try
                 {
@@ -501,12 +535,12 @@ namespace SenseNet.ContentRepository.Storage
         /// Gets the security handler for this <see cref="Node"/>. This is the entry point of all permission-related operations.
         /// </summary>
         /// <value>The security handler.</value>
-        public SecurityHandler Security
+        public NodeSecurity Security
         {
             get
             {
                 if (_security == null)
-                    _security = new SecurityHandler(this);
+                    _security = new NodeSecurity(this, Providers.Instance.SecurityHandler);
                 return _security;
             }
         }
@@ -608,24 +642,16 @@ namespace SenseNet.ContentRepository.Storage
                 SetCreationDate(value);
             }
         }
+
         /// <summary>
         /// Checks if the current user is a system user or a member of the Operators group
         /// and throws a <see cref="NotSupportedException"/> if not.
         /// </summary>
         /// <param name="propertyName">The property that the caller tried to access. Used only when throwing an exception.</param>
-        protected void AssertUserIsOperator(string propertyName) 
+        protected void AssertUserIsOperator(string propertyName)
         {
-            var user = AccessProvider.Current.GetCurrentUser();
-
-            // there is no need for group check in elevated mode
-            if (user is SystemUser)
-                return;
-
-            using (new SystemAccount())
-            {
-                if (!user.IsInGroup((IGroup)Node.LoadNode(Identifiers.OperatorsGroupPath)))
-                    throw new NotSupportedException(String.Format(SR.Exceptions.General.Msg_CannotWriteReadOnlyProperty_1, propertyName));
-            }
+            if (!AccessProvider.Current.GetCurrentUser().IsOperator)
+                throw new NotSupportedException(string.Format(SR.Exceptions.General.Msg_CannotWriteReadOnlyProperty_1, propertyName));
         }
 
         /// <summary>
@@ -633,9 +659,9 @@ namespace SenseNet.ContentRepository.Storage
         /// </summary>
         private void SetCreationDate(DateTime creation)
         {
-            if (creation < DataProvider.Current.DateTimeMinValue)
+            if (creation < DataStore.DateTimeMinValue)
                 throw SR.Exceptions.General.Exc_LessThanDateTimeMinValue();
-            if (creation > DataProvider.Current.DateTimeMaxValue)
+            if (creation > DataStore.DateTimeMaxValue)
                 throw SR.Exceptions.General.Exc_BiggerThanDateTimeMaxValue();
             MakePrivateData();
             _data.CreationDate = creation;
@@ -680,9 +706,9 @@ namespace SenseNet.ContentRepository.Storage
             get { return _data.ModificationDate; }
             set
             {
-                if (value < DataProvider.Current.DateTimeMinValue)
+                if (value < DataStore.DateTimeMinValue)
                     throw SR.Exceptions.General.Exc_LessThanDateTimeMinValue();
-                if (value > DataProvider.Current.DateTimeMaxValue)
+                if (value > DataStore.DateTimeMaxValue)
                     throw SR.Exceptions.General.Exc_BiggerThanDateTimeMaxValue();
 
                 MakePrivateData();
@@ -776,9 +802,9 @@ namespace SenseNet.ContentRepository.Storage
         /// </summary>
         private void SetVersionCreationDate(DateTime creation)
         {
-            if (creation < DataProvider.Current.DateTimeMinValue)
+            if (creation < DataStore.DateTimeMinValue)
                 throw SR.Exceptions.General.Exc_LessThanDateTimeMinValue();
-            if (creation > DataProvider.Current.DateTimeMaxValue)
+            if (creation > DataStore.DateTimeMaxValue)
                 throw SR.Exceptions.General.Exc_BiggerThanDateTimeMaxValue();
             MakePrivateData();
             _data.VersionCreationDate = creation;
@@ -823,9 +849,9 @@ namespace SenseNet.ContentRepository.Storage
             get { return _data.VersionModificationDate; }
             set
             {
-                if (value < DataProvider.Current.DateTimeMinValue)
+                if (value < DataStore.DateTimeMinValue)
                     throw SR.Exceptions.General.Exc_LessThanDateTimeMinValue();
-                if (value > DataProvider.Current.DateTimeMaxValue)
+                if (value > DataStore.DateTimeMaxValue)
                     throw SR.Exceptions.General.Exc_BiggerThanDateTimeMaxValue();
 
                 MakePrivateData();
@@ -1370,28 +1396,57 @@ namespace SenseNet.ContentRepository.Storage
 
         /// <summary>
         /// Assigns the specified collection to the reference property of this <see cref="Node"/>.
-        /// The proerty is identified by the given name.
+        /// The property is identified by the given name.
         /// </summary>
         /// <typeparam name="T">Node or any inherited type.</typeparam>
         public void SetReferences<T>(string propertyName, IEnumerable<T> nodes) where T : Node
         {
-            ClearReference(propertyName);
-            AddReferences(propertyName, nodes);
+            SetReferences(GetNodeList(propertyName), nodes);
         }
         internal void SetReferences<T>(int propertyId, IEnumerable<T> nodes) where T : Node
         {
-            ClearReference(propertyId);
-            AddReferences(propertyId, nodes);
+            SetReferences(GetNodeList(propertyId), nodes);
         }
         /// <summary>
         /// Assigns the specified collection to the reference property of this <see cref="Node"/>.
-        /// The proerty is identified by the given <see cref="PropertyType"/>.
+        /// The property is identified by the given <see cref="PropertyType"/>.
         /// </summary>
         /// <typeparam name="T">Node or any inherited type.</typeparam>
         public void SetReferences<T>(PropertyType property, IEnumerable<T> nodes) where T : Node
         {
-            ClearReference(property);
-            AddReferences(property, nodes);
+            var originalList = GetNodeList(property);
+            SetReferences(GetNodeList(property), nodes);
+        }
+        private void SetReferences<T>(NodeList<Node> nodeList, IEnumerable<T> nodes) where T : Node
+        {
+            // remove visible elements
+            var user = AccessProvider.Current.GetCurrentUser();
+            if (user.Id == Identifiers.SystemUserId)
+            {
+                // acceleration: all items are visible to the SystemUser
+                nodeList.Clear();
+            }
+            else
+            {
+                var visibleItems = nodeList.GetIdentifiers()
+                    .Where(nodeId =>
+                    {
+                        try
+                        {
+                            return Providers.Instance.SecurityHandler.HasPermission(user, nodeId, PermissionType.See);
+                        }
+                        catch (EntityNotFoundException)
+                        {
+                            // If user is deleted, remove her id from the list.
+                            return true;
+                        }
+                    });
+                foreach (var id in visibleItems)
+                    nodeList.Remove(id);
+            }
+
+            // add new instances
+            AddReferences(nodeList, nodes, false);
         }
 
         /// <summary>
@@ -1631,11 +1686,11 @@ namespace SenseNet.ContentRepository.Storage
             if (nodeTypeName == null)
                 nodeTypeName = this.GetType().Name;
 
-            var nodeType = NodeTypeManager.Current.NodeTypes[nodeTypeName];
+            var nodeType = StorageSchema.NodeTypes[nodeTypeName];
             if (nodeType == null)
             {
                 nodeTypeName = this.GetType().FullName;
-                nodeType = NodeTypeManager.Current.NodeTypes[nodeTypeName];
+                nodeType = StorageSchema.NodeTypes[nodeTypeName];
 
                 if (nodeType == null)
                     throw new RegistrationException(String.Concat(SR.Exceptions.Schema.Msg_UnknownNodeType, ": ", nodeTypeName));
@@ -1653,7 +1708,7 @@ namespace SenseNet.ContentRepository.Storage
                 throw new ApplicationException("Cannot create a ContentList under another ContentList");
             }
 
-            var data = DataBackingStore.CreateNewNodeData(parent, nodeType, listType, listId);
+            var data = DataStore.CreateNewNodeData(parent, nodeType, listType, listId);
             SetNodeData(data);
 
         }
@@ -1706,13 +1761,27 @@ namespace SenseNet.ContentRepository.Storage
         // ----------------------------------------------------------------------------- Static batch loaders
 
         /// <summary>
-        /// Returns <see cref="Node"/> instances loaded by the given ids. The current user has 
+        /// Loads <see cref="Node"/> instances by the provided ids. The current user has to have
         /// at least See permission for each item in the result set.
         /// </summary>
         /// <param name="idArray">The IEnumerable&lt;int&gt; that contains the requested ids.</param>
         public static List<Node> LoadNodes(IEnumerable<int> idArray)
         {
-            return LoadNodes(DataBackingStore.GetNodeHeads(idArray), VersionNumber.LastAccessible);
+            return LoadNodes(Providers.Instance.DataStore
+                    .LoadNodeHeadsAsync(idArray, CancellationToken.None).GetAwaiter().GetResult(),
+                VersionNumber.LastAccessible);
+        }
+        /// <summary>
+        /// Loads <see cref="Node"/> instances by the provided ids. The current user has to have
+        /// at least See permission for each item in the result set.
+        /// </summary>
+        /// <param name="idArray">The IEnumerable&lt;int&gt; that contains the requested ids.</param>
+        /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
+        public static async Task<List<Node>> LoadNodesAsync(IEnumerable<int> idArray, CancellationToken cancellationToken)
+        {
+            var nodeHeads = await Providers.Instance.DataStore
+                .LoadNodeHeadsAsync(idArray, cancellationToken).ConfigureAwait(false);
+            return await LoadNodesAsync(nodeHeads, VersionNumber.LastAccessible, cancellationToken).ConfigureAwait(false);
         }
         private static List<Node> LoadNodes(IEnumerable<NodeHead> heads, VersionNumber version)
         {
@@ -1720,51 +1789,13 @@ namespace SenseNet.ContentRepository.Storage
             var versionIdList = new List<int>();
             var headonlyList = new List<int>();
 
-            // resolving versionid array
-            foreach (var head in heads)
-            {
-                if (head == null)
-                    continue;
-
-                AccessLevel userAccessLevel;
-
-                try
-                {
-                    userAccessLevel = GetUserAccessLevel(head);
-                }
-                catch (SenseNet.Security.SecurityStructureException)
-                {
-                    // skip the non-existent item
-                    continue;
-                }
-                catch (SenseNet.Security.AccessDeniedException)
-                {
-                    // the user does not have permission to see/open this node
-                    continue;
-                }
-                catch (SenseNetSecurityException)
-                {
-                    // the user does not have permission to see/open this node
-                    continue;
-                }
-
-                var acceptedLevel = GetAcceptedLevel(userAccessLevel, version);
-                if (acceptedLevel == AccessLevel.Header)
-                    headonlyList.Add(head.Id);
-
-                var versionId = GetVersionId(head, acceptedLevel, version);
-
-                // if user has not enough permissions, skip the node
-                if (versionId <= 0)
-                    continue;
-
-                headList.Add(head);
-                versionIdList.Add(versionId);
-            }
+            ResolveNodeHeadsAndVersionIds(heads, version, headList, versionIdList, headonlyList);
 
             // loading data
             var result = new List<Node>();
-            var tokenArray = DataBackingStore.GetNodeData(headList.ToArray(), versionIdList.ToArray());
+            var tokenArray = Providers.Instance.DataStore
+                .LoadNodesAsync(headList.ToArray(), versionIdList.ToArray(), CancellationToken.None)
+                .GetAwaiter().GetResult();
             for (int i = 0; i < tokenArray.Length; i++)
             {
                 var token = tokenArray[i];
@@ -1774,7 +1805,21 @@ namespace SenseNet.ContentRepository.Storage
                 {
                     if (token.NodeData != null)
                     {
-                        var node = CreateTargetClass(token);
+                        Node node;
+
+                        try
+                        {
+                            node = CreateTargetClass(token);
+                        }
+                        catch (ApplicationException)
+                        {
+                            // Could not create an instance of the target class.
+                            SnTrace.Repository.WriteError($"Could not create an instance of {token.NodeType.Name} " +
+                                                          $"with class {token.NodeType.ClassName}. NodeId: {token.NodeId}, " +
+                                                          $"Path: {token.NodeHead.Path}");
+                            break;
+                        }
+
                         if (isHeadOnly)
                         {
                             // if the user has Preview permissions, that means a broader access than headonly
@@ -1812,11 +1857,138 @@ namespace SenseNet.ContentRepository.Storage
                         if (acceptedLevel == AccessLevel.Header)
                             isHeadOnly = true;
                         var versionId = GetVersionId(head, acceptedLevel, version);
-                        token = DataBackingStore.GetNodeData(head, versionId);
+                        token = Providers.Instance.DataStore
+                            .LoadNodeAsync(head, versionId, CancellationToken.None).GetAwaiter().GetResult();
                     }
                 }
             }
             return result;
+        }
+        private static async Task<List<Node>> LoadNodesAsync(IEnumerable<NodeHead> heads, VersionNumber version, CancellationToken cancellationToken)
+        {
+            var headList = new List<NodeHead>();
+            var versionIdList = new List<int>();
+            var headonlyList = new List<int>();
+
+            ResolveNodeHeadsAndVersionIds(heads, version, headList, versionIdList, headonlyList);
+            
+            // loading data
+            var result = new List<Node>();
+            var tokenArray = await Providers.Instance.DataStore
+                .LoadNodesAsync(headList.ToArray(), versionIdList.ToArray(), cancellationToken).ConfigureAwait(false);
+
+            for (var i = 0; i < tokenArray.Length; i++)
+            {
+                var token = tokenArray[i];
+                var retry = 0;
+                var isHeadOnly = headonlyList.Contains(token.NodeId);
+                while (true)
+                {
+                    if (token.NodeData != null)
+                    {
+                        Node node;
+
+                        try
+                        {
+                            node = CreateTargetClass(token);
+                        }
+                        catch (ApplicationException)
+                        {
+                            // Could not create an instance of the target class.
+                            SnTrace.Repository.WriteError($"Could not create an instance of {token.NodeType.Name} " +
+                                                          $"with class {token.NodeType.ClassName}. NodeId: {token.NodeId}, " +
+                                                          $"Path: {token.NodeHead.Path}");
+                            break;
+                        }
+
+                        if (isHeadOnly)
+                        {
+                            // if the user has Preview permissions, that means a broader access than headonly
+                            if (PreviewProvider.HasPreviewPermission(headList.FirstOrDefault(h => h.Id == token.NodeId)))
+                                node.IsPreviewOnly = true;
+                            else
+                                node.IsHeadOnly = true;
+                        }
+
+                        result.Add(node);
+                        break;
+                    }
+                    else
+                    {
+                        // retrying with reload nodehead
+                        if (++retry > 1) // one time
+                            break;
+
+                        SnTrace.Repository.Write("Version is lost. VersionId:{0}, path:{1}", token.VersionId, token.NodeHead.Path);
+                        var head = await NodeHead.GetAsync(token.NodeHead.Id, cancellationToken).ConfigureAwait(false);
+                        if (head == null) // deleted
+                            break;
+
+                        AccessLevel userAccessLevel;
+                        try
+                        {
+                            userAccessLevel = GetUserAccessLevel(head);
+                        }
+                        catch (SecurityStructureException) // deleted
+                        {
+                            break;
+                        }
+
+                        var acceptedLevel = GetAcceptedLevel(userAccessLevel, version);
+                        if (acceptedLevel == AccessLevel.Header)
+                            isHeadOnly = true;
+                        var versionId = GetVersionId(head, acceptedLevel, version);
+                        token = await Providers.Instance.DataStore
+                            .LoadNodeAsync(head, versionId, cancellationToken).ConfigureAwait(false);
+                    }
+                }
+            }
+            return result;
+        }
+        private static void ResolveNodeHeadsAndVersionIds(IEnumerable<NodeHead> heads, VersionNumber version,
+            List<NodeHead> headList, List<int> versionIdList, List<int> headonlyList)
+        {
+            // resolving versionid array
+            foreach (var head in heads)
+            {
+                if (head == null)
+                    continue;
+
+                AccessLevel userAccessLevel;
+
+                try
+                {
+                    userAccessLevel = GetUserAccessLevel(head);
+                }
+                catch (SecurityStructureException)
+                {
+                    // skip the non-existent item
+                    continue;
+                }
+                catch (AccessDeniedException)
+                {
+                    // the user does not have permission to see/open this node
+                    continue;
+                }
+                catch (SenseNetSecurityException)
+                {
+                    // the user does not have permission to see/open this node
+                    continue;
+                }
+
+                var acceptedLevel = GetAcceptedLevel(userAccessLevel, version);
+                if (acceptedLevel == AccessLevel.Header)
+                    headonlyList.Add(head.Id);
+
+                var versionId = GetVersionId(head, acceptedLevel, version);
+
+                // if user has not enough permissions, skip the node
+                if (versionId <= 0)
+                    continue;
+
+                headList.Add(head);
+                versionIdList.Add(versionId);
+            }
         }
 
         /// <summary>
@@ -1840,47 +2012,97 @@ namespace SenseNet.ContentRepository.Storage
         // ----------------------------------------------------------------------------- Static single loaders
 
         /// <summary>
-        /// Loads the appropiate <see cref="Node"/> by the given id.
+        /// Loads a <see cref="Node"/> by the provided id.
         /// </summary>
-        /// <typeparam name="T">The desired return type.</typeparam>
-        /// <param name="nodeId">The requested id.</param>
+        /// <typeparam name="T">The requested return type.</typeparam>
+        /// <param name="nodeId">Node id.</param>
+        /// <returns>A node as the provided derived type.</returns>
         public static T Load<T>(int nodeId) where T : Node
         {
             return (T)LoadNode(nodeId);
         }
         /// <summary>
-        /// Loads the appropiate <see cref="Node"/> by the given id and version.
+        /// Loads a <see cref="Node"/> by the provided id.
         /// </summary>
-        /// <typeparam name="T">The desired return type.</typeparam>
-        /// <param name="nodeId">The requested id.</param>
-        /// <param name="version">The requested version for example: new VersionNumber(2, 0).</param>
+        /// <typeparam name="T">The requested return type.</typeparam>
+        /// <param name="nodeId">Node id.</param>
+        /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
+        /// <returns>A node as the provided derived type.</returns>
+        public static async Task<T> LoadAsync<T>(int nodeId, CancellationToken cancellationToken) where T : Node
+        {
+            return (T) await LoadNodeAsync(nodeId, cancellationToken).ConfigureAwait(false);
+        }
+        /// <summary>
+        /// Loads a <see cref="Node"/> by the provided id and version.
+        /// </summary>
+        /// <typeparam name="T">The requested return type.</typeparam>
+        /// <param name="nodeId">Node id.</param>
+        /// <param name="version">The requested version. For example: new VersionNumber(2, 0).</param>
+        /// <returns>A node as the provided derived type.</returns>
         public static T Load<T>(int nodeId, VersionNumber version) where T : Node
         {
             return (T)LoadNode(nodeId, version);
         }
         /// <summary>
-        /// Loads the appropiate <see cref="Node"/> by the given path.
+        /// Loads a <see cref="Node"/> by the provided id and version.
         /// </summary>
-        /// <typeparam name="T">The desired return type.</typeparam>
-        /// <param name="path">The requested path.</param>
+        /// <typeparam name="T">The requested return type.</typeparam>
+        /// <param name="nodeId">Node id.</param>
+        /// <param name="version">The requested version. For example: new VersionNumber(2, 0).</param>
+        /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
+        /// <returns>A node as the provided derived type.</returns>
+        public static async Task<T> LoadAsync<T>(int nodeId, VersionNumber version, CancellationToken cancellationToken) where T : Node
+        {
+            return (T) await LoadNodeAsync(nodeId, version, cancellationToken).ConfigureAwait(false);
+        }
+        /// <summary>
+        /// Loads a <see cref="Node"/> by the provided path.
+        /// </summary>
+        /// <typeparam name="T">The requested return type.</typeparam>
+        /// <param name="path">Node path.</param>
+        /// <returns>A node as the provided derived type.</returns>
         public static T Load<T>(string path) where T : Node
         {
             return (T)LoadNode(path);
         }
         /// <summary>
-        /// Loads the appropiate <see cref="Node"/> by the given path and version.
+        /// Loads a <see cref="Node"/> by the provided path.
         /// </summary>
-        /// <typeparam name="T">The desired return type.</typeparam>
-        /// <param name="path">The requested path.</param>
-        /// <param name="version">The requested version for example: new VersionNumber(2, 0).</param>
-        /// <returns></returns>
+        /// <typeparam name="T">The requested return type.</typeparam>
+        /// <param name="path">Node path.</param>
+        /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
+        /// <returns>A node as the provided derived type.</returns>
+        public static async Task<T> LoadAsync<T>(string path, CancellationToken cancellationToken) where T : Node
+        {
+            return (T) await LoadNodeAsync(path, cancellationToken).ConfigureAwait(false);
+        }
+        /// <summary>
+        /// Loads a <see cref="Node"/> by the provided path and version.
+        /// </summary>
+        /// <typeparam name="T">The requested return type.</typeparam>
+        /// <param name="path">Node path.</param>
+        /// <param name="version">The requested version. For example: new VersionNumber(2, 0).</param>
+        /// <returns>A node as the provided derived type.</returns>
         public static T Load<T>(string path, VersionNumber version) where T : Node
         {
             return (T)LoadNode(path, version);
         }
 
         /// <summary>
-        /// Loads the appropiate <see cref="Node"/> by the given path.
+        /// Loads a <see cref="Node"/> by the provided path and version.
+        /// </summary>
+        /// <typeparam name="T">The requested return type.</typeparam>
+        /// <param name="path">Node path.</param>
+        /// <param name="version">The requested version. For example: new VersionNumber(2, 0).</param>
+        /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
+        /// <returns>A node as the provided derived type.</returns>
+        public static async Task<T> LoadAsync<T>(string path, VersionNumber version, CancellationToken cancellationToken) where T : Node
+        {
+            return (T) await LoadNodeAsync(path, version, cancellationToken).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Loads a <see cref="Node"/> by the provided path.
         /// </summary>
         /// <example>How to load a <see cref="Node"/> by passing the sensenet Content Repository path.
         /// In this case you will get a <see cref="Node"/> named "node" filled with the data of the latest 
@@ -1889,13 +2111,31 @@ namespace SenseNet.ContentRepository.Storage
         /// Node node = Node.LoadNode("/Root/MyFavoriteNode");
         /// </code>
         /// </example>
+        /// <param name="path">Node path.</param>
         /// <returns>The latest accessible version of the <see cref="Node"/> that has the given path, or null.</returns>
         public static Node LoadNode(string path)
         {
             return LoadNode(path, DefaultAbstractVersion);
         }
         /// <summary>
-        /// Loads the appropiate <see cref="Node"/> by the given path and version.
+        /// Loads a <see cref="Node"/> by the provided path.
+        /// </summary>
+        /// <example>How to load a <see cref="Node"/> by passing the sensenet Content Repository path.
+        /// In this case you will get a <see cref="Node"/> named "node" filled with the data of the latest 
+        /// version of <see cref="Node"/> /Root/MyFavoriteNode.
+        /// <code>
+        /// Node node = Node.LoadNode("/Root/MyFavoriteNode");
+        /// </code>
+        /// </example>
+        /// <param name="path">Node path.</param>
+        /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
+        /// <returns>The latest accessible version of the <see cref="Node"/> that has the given path, or null.</returns>
+        public static Task<Node> LoadNodeAsync(string path, CancellationToken cancellationToken)
+        {
+            return LoadNodeAsync(path, DefaultAbstractVersion, cancellationToken);
+        }
+        /// <summary>
+        /// Loads a <see cref="Node"/> by the provided path and version.
         /// </summary>
         /// <example>How to load version 2.0 of a <see cref="Node"/> by passing the sensenet Content Repository path.
         /// In this case you will get a <see cref="Node"/> named "node" filled with the data of the provided 
@@ -1905,15 +2145,42 @@ namespace SenseNet.ContentRepository.Storage
         /// Node node = Node.LoadNode("/Root/MyFavoriteNode", versionNumber);
         /// </code>
         /// </example>
+        /// <param name="path">Node path.</param>
+        /// <param name="version">The requested version. For example: new VersionNumber(2, 0).</param>
         /// <returns>The <see cref="Node"/> holds the data of the given version of the <see cref="Node"/> that has the given path.</returns>
         public static Node LoadNode(string path, VersionNumber version)
         {
             if (path == null)
                 throw new ArgumentNullException("path");
-            return LoadNode(DataBackingStore.GetNodeHead(path), version);
+            return LoadNode(Providers.Instance.DataStore
+                .LoadNodeHeadAsync(path, CancellationToken.None).GetAwaiter().GetResult(), version);
         }
         /// <summary>
-        /// Loads the appropiate <see cref="Node"/> by the given Id.
+        /// Loads a <see cref="Node"/> by the provided path and version.
+        /// </summary>
+        /// <example>How to load version 2.0 of a <see cref="Node"/> by passing the sensenet Content Repository path.
+        /// In this case you will get a <see cref="Node"/> named "node" filled with the data of the provided 
+        /// version of <see cref="Node"/> /Root/MyFavoriteNode.
+        /// <code>
+        /// VersionNumber versionNumber = new VersionNumber(2, 0);
+        /// Node node = Node.LoadNode("/Root/MyFavoriteNode", versionNumber);
+        /// </code>
+        /// </example>
+        /// <param name="path">Node path.</param>
+        /// <param name="version">The requested version. For example: new VersionNumber(2, 0).</param>
+        /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
+        /// <returns>The <see cref="Node"/> holds the data of the given version of the <see cref="Node"/> that has the given path.</returns>
+        public static async Task<Node> LoadNodeAsync(string path, VersionNumber version, CancellationToken cancellationToken)
+        {
+            if (path == null)
+                throw new ArgumentNullException(nameof(path));
+
+            var nodeHead = await Providers.Instance.DataStore
+                .LoadNodeHeadAsync(path, cancellationToken).ConfigureAwait(false);
+            return await LoadNodeAsync(nodeHead, version, cancellationToken).ConfigureAwait(false);
+        }
+        /// <summary>
+        /// Loads a <see cref="Node"/> by the provided Id.
         /// </summary>
         /// <example>How to load the latest version of the <see cref="Node"/> identified by the Id 132. 
         /// In this case you will get a <see cref="Node"/> named node filled with the data of the latest version of <see cref="Node"/> 132.
@@ -1921,13 +2188,30 @@ namespace SenseNet.ContentRepository.Storage
         /// Node node = Node.LoadNode(132);
         /// </code>
         /// </example>
+        /// <param name="nodeId">Node id.</param>
         /// <returns>The latest version of the <see cref="Node"/> that has the given Id.</returns> 
         public static Node LoadNode(int nodeId)
         {
             return LoadNode(nodeId, DefaultAbstractVersion);
         }
         /// <summary>
-        /// Loads the appropiate <see cref="Node"/> by the given Id and version number.
+        /// Loads a <see cref="Node"/> by the provided Id.
+        /// </summary>
+        /// <example>How to load the latest version of the <see cref="Node"/> identified by the Id 132. 
+        /// In this case you will get a <see cref="Node"/> named node filled with the data of the latest version of <see cref="Node"/> 132.
+        /// <code>
+        /// Node node = Node.LoadNode(132);
+        /// </code>
+        /// </example>
+        /// <param name="nodeId">Node id.</param>
+        /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
+        /// <returns>The latest version of the <see cref="Node"/> that has the given Id.</returns> 
+        public static Task<Node> LoadNodeAsync(int nodeId, CancellationToken cancellationToken)
+        {
+            return LoadNodeAsync(nodeId, DefaultAbstractVersion, cancellationToken);
+        }
+        /// <summary>
+        /// Loads a <see cref="Node"/> by the provided Id and version number.
         /// </summary>
         /// <example>How to load version 2.0 of the <see cref="Node"/> identified by the Id 132. In this case you will 
         /// get a <see cref="Node"/> named "node" filled with the data of the given version of <see cref="Node"/> 132.
@@ -1936,21 +2220,58 @@ namespace SenseNet.ContentRepository.Storage
         /// Node node = Node.LoadNode(132, versionNumber);
         /// </code>
         /// </example>
+        /// <param name="nodeId">Node id.</param>
+        /// <param name="version">The requested version. For example: new VersionNumber(2, 0).</param>
         /// <returns>The given version of the <see cref="Node"/> that has the given Id.</returns>
         public static Node LoadNode(int nodeId, VersionNumber version)
         {
-            return LoadNode(DataBackingStore.GetNodeHead(nodeId), version);
+            return LoadNode(Providers.Instance.DataStore
+                .LoadNodeHeadAsync(nodeId, CancellationToken.None).GetAwaiter().GetResult(), version);
         }
         /// <summary>
-        /// Loads the appropiate <see cref="Node"/> by the given <see cref="NodeHead"/>.
+        /// Loads a <see cref="Node"/> by the provided Id and version number.
         /// </summary>
+        /// <example>How to load version 2.0 of the <see cref="Node"/> identified by the Id 132. In this case you will 
+        /// get a <see cref="Node"/> named "node" filled with the data of the given version of <see cref="Node"/> 132.
+        /// <code>
+        /// VersionNumber versionNumber = new VersionNumber(2, 0);
+        /// Node node = Node.LoadNode(132, versionNumber);
+        /// </code>
+        /// </example>
+        /// <param name="nodeId">Node id.</param>
+        /// <param name="version">The requested version. For example: new VersionNumber(2, 0).</param>
+        /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
+        /// <returns>The given version of the <see cref="Node"/> that has the given Id.</returns>
+        public static async Task<Node> LoadNodeAsync(int nodeId, VersionNumber version, CancellationToken cancellationToken)
+        {
+            var nodeHead = await Providers.Instance.DataStore
+                .LoadNodeHeadAsync(nodeId, cancellationToken).ConfigureAwait(false);
+            return await LoadNodeAsync(nodeHead, version, cancellationToken).ConfigureAwait(false);
+        }
+        /// <summary>
+        /// Loads a <see cref="Node"/> by the provided <see cref="NodeHead"/>.
+        /// </summary>
+        /// <param name="head">Node head.</param>
         public static Node LoadNode(NodeHead head)
         {
             return LoadNode(head, null);
         }
+
         /// <summary>
-        /// Loads the appropiate <see cref="Node"/> by the given <see cref="NodeHead"/> and <see cref="VersionNumber"/>.
+        /// Loads a <see cref="Node"/> by the provided <see cref="NodeHead"/>.
         /// </summary>
+        /// <param name="head">Node head.</param>
+        /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
+        public static Task<Node> LoadNodeAsync(NodeHead head, CancellationToken cancellationToken)
+        {
+            return LoadNodeAsync(head, null, cancellationToken);
+        }
+
+        /// <summary>
+        /// Loads a <see cref="Node"/> by the provided <see cref="NodeHead"/> and <see cref="VersionNumber"/>.
+        /// </summary>
+        /// <param name="head">Node head.</param>
+        /// <param name="version">The requested version. For example: new VersionNumber(2, 0).</param>
         public static Node LoadNode(NodeHead head, VersionNumber version)
         {
             if (version == null)
@@ -1989,7 +2310,8 @@ namespace SenseNet.ContentRepository.Storage
                     return (Node)cachedNode;
                 // </L2Cache>
 
-                var token = DataBackingStore.GetNodeData(head, versionId);
+                var token = Providers.Instance.DataStore
+                    .LoadNodeAsync(head, versionId, CancellationToken.None).GetAwaiter().GetResult();
                 if (token.NodeData != null)
                 {
                     var node = CreateTargetClass(token);
@@ -2017,7 +2339,79 @@ namespace SenseNet.ContentRepository.Storage
             }
         }
         /// <summary>
-        /// Loads the appropiate <see cref="Node"/> by the given parameter that can be a path or an id as a string.
+        /// Loads a <see cref="Node"/> by the provided <see cref="NodeHead"/> and <see cref="VersionNumber"/>.
+        /// </summary>
+        /// <param name="head">Node head.</param>
+        /// <param name="version">The requested version. For example: new VersionNumber(2, 0).</param>
+        /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
+        public static async Task<Node> LoadNodeAsync(NodeHead head, VersionNumber version, CancellationToken cancellationToken)
+        {
+            if (version == null)
+                version = DefaultAbstractVersion;
+
+            if (version == VersionNumber.LastFinalized)
+                return await LoadLastFinalizedVersionAsync(head, cancellationToken).ConfigureAwait(false);
+
+            var retry = 0;
+            while (true)
+            {
+                if (head == null)
+                    return null;
+
+                AccessLevel userAccessLevel;
+                try
+                {
+                    userAccessLevel = GetUserAccessLevel(head);
+                }
+                catch (SecurityStructureException)
+                {
+                    return null;
+                }
+
+                var acceptedLevel = GetAcceptedLevel(userAccessLevel, version);
+                var versionId = GetVersionId(head, acceptedLevel != AccessLevel.Header ? acceptedLevel : AccessLevel.Major, version);
+
+                // if the requested version does not exist, return immediately
+                if (versionId == 0)
+                    return null;
+
+                // <L2Cache>
+                var l2CacheKey = GetL2CacheKey(versionId, acceptedLevel);
+                var cachedNode = StorageContext.L2Cache.Get(l2CacheKey);
+                if (cachedNode != null)
+                    return (Node)cachedNode;
+                // </L2Cache>
+
+                var token = await Providers.Instance.DataStore
+                    .LoadNodeAsync(head, versionId, CancellationToken.None).ConfigureAwait(false);
+                if (token.NodeData != null)
+                {
+                    var node = CreateTargetClass(token);
+                    if (acceptedLevel == AccessLevel.Header)
+                    {
+                        // if the user has Preview permissions, that means a broader access than head-only
+                        if (PreviewProvider.HasPreviewPermission(head))
+                            node.IsPreviewOnly = true;
+                        else
+                            node.IsHeadOnly = true;
+                    }
+
+                    // <L2Cache>
+                    StorageContext.L2Cache.Set(l2CacheKey, node);
+                    // </L2Cache>
+
+                    return node;
+                }
+                // lost version
+                if (++retry > 1)
+                    return null;
+                // retry
+                SnTrace.Repository.Write("Version is lost. VersionId:{0}, path:{1}", versionId, head.Path);
+                head = await NodeHead.GetAsync(head.Id, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        /// <summary>
+        /// Loads a <see cref="Node"/> by the provided parameter that can be a path or an id as a string.
         /// </summary>
         /// <param name="idOrPath">Id (e.g. "42") or path (e.g. "/Root/System").</param>
         public static Node LoadNodeByIdOrPath(string idOrPath)
@@ -2034,6 +2428,25 @@ namespace SenseNet.ContentRepository.Storage
 
             return null;
         }
+
+        /// <summary>
+        /// Loads a <see cref="Node"/> by the provided parameter that can be a path or an id as a string.
+        /// </summary>
+        /// <param name="idOrPath">Id (e.g. "42") or path (e.g. "/Root/System").</param>
+        /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
+        public static Task<Node> LoadNodeByIdOrPathAsync(string idOrPath, CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrEmpty(idOrPath))
+                return Task.FromResult(null as Node);
+
+            if (int.TryParse(idOrPath, out var nodeId))
+                return Node.LoadNodeAsync(nodeId, cancellationToken);
+
+            if (RepositoryPath.IsValidPath(idOrPath) == RepositoryPath.PathResult.Correct)
+                return Node.LoadNodeAsync(idOrPath, cancellationToken);
+
+            return Task.FromResult(null as Node);
+        }
         private static Node LoadLastFinalizedVersion(NodeHead head)
         {
             var node = Node.LoadNode(head, VersionNumber.LastAccessible);
@@ -2044,12 +2457,30 @@ namespace SenseNet.ContentRepository.Storage
             else
                 return Node.LoadNode(head, VersionNumber.LastMajor);
         }
+        private static async Task<Node> LoadLastFinalizedVersionAsync(NodeHead head, CancellationToken cancellationToken)
+        {
+            var node = await LoadNodeAsync(head, VersionNumber.LastAccessible, cancellationToken).ConfigureAwait(false);
+            if (node.SavingState == ContentSavingState.Finalized)
+                return node;
+            if (node.Security.HasPermission(PermissionType.RecallOldVersion))
+                return await LoadNodeByLastBeforeVersionIdAsync(head, cancellationToken).ConfigureAwait(false);
+
+            return await LoadNodeAsync(head, VersionNumber.LastMajor, cancellationToken).ConfigureAwait(false);
+        }
         private static Node LoadNodeByLastBeforeVersionId(NodeHead head)
         {
             var versions = head.Versions;
             if (versions.Length < 2)
                 return null;
             return Node.LoadNodeByVersionId(versions[versions.Length - 2].VersionId);
+        }
+        private static async Task<Node> LoadNodeByLastBeforeVersionIdAsync(NodeHead head, CancellationToken cancellationToken)
+        {
+            var versions = head.Versions;
+            if (versions.Length < 2)
+                return null;
+
+            return await LoadNodeByVersionIdAsync(versions[versions.Length - 2].VersionId, cancellationToken).ConfigureAwait(false);
         }
 
         // <L2Cache>
@@ -2067,7 +2498,7 @@ namespace SenseNet.ContentRepository.Storage
         {
             var userId = AccessProvider.Current.GetCurrentUser().Id;
             var isOwner = head.CreatorId == userId;
-            switch (SecurityHandler.GetPermittedLevel(head))
+            switch (Providers.Instance.SecurityHandler.GetPermittedLevel(head))
             {
                 case PermittedLevel.None:
                     throw new SenseNetSecurityException(head.Path, PermissionType.See, AccessProvider.Current.GetCurrentUser(), "Access denied.");
@@ -2156,7 +2587,7 @@ namespace SenseNet.ContentRepository.Storage
         }
 
         /// <summary>
-        /// Returns a cached value by the given name. You can store any instance-related cacheable
+        /// Returns a cached value by the provided name. You can store any instance-related cacheable
         /// object using the <see cref="SetCachedData"/> method.
         /// </summary>
         public object GetCachedData(string name)
@@ -2181,7 +2612,7 @@ namespace SenseNet.ContentRepository.Storage
         private static void FillData(Node node, NodeToken token)
         {
             string typeName = node.GetType().FullName;
-            string typeNameInHead = NodeTypeManager.Current.NodeTypes.GetItemById(token.NodeData.NodeTypeId).ClassName;
+            string typeNameInHead = Providers.Instance.StorageSchema.NodeTypes.GetItemById(token.NodeData.NodeTypeId).ClassName;
             if (typeNameInHead != typeName)
             {
                 var message = String.Concat("Cannot create a ", typeName, " instance because type name is different in the passed head: ", typeNameInHead);
@@ -2198,7 +2629,10 @@ namespace SenseNet.ContentRepository.Storage
         /// <returns>A list of version numbers.</returns>
         public static List<VersionNumber> GetVersionNumbers(int nodeId)
         {
-            return new List<VersionNumber>(DataProvider.Current.GetVersionNumbers(nodeId));
+            return Providers.Instance.DataStore
+                .GetVersionNumbersAsync(nodeId, CancellationToken.None).GetAwaiter().GetResult()
+                .Select(x => x.VersionNumber)
+                .ToList();
         }
         /// <summary>
         /// Gets the list of avaliable versions of the <see cref="Node"/> identified by path.
@@ -2207,8 +2641,11 @@ namespace SenseNet.ContentRepository.Storage
         public static List<VersionNumber> GetVersionNumbers(string path)
         {
             if (path == null)
-                throw new ArgumentNullException("path");
-            return new List<VersionNumber>(DataProvider.Current.GetVersionNumbers(path));
+                throw new ArgumentNullException(nameof(path));
+            return Providers.Instance.DataStore
+                .GetVersionNumbersAsync(path, CancellationToken.None).GetAwaiter().GetResult()
+                .Select(x => x.VersionNumber)
+                .ToList();
         }
 
         /// <summary>
@@ -2221,6 +2658,8 @@ namespace SenseNet.ContentRepository.Storage
         /// </summary>
         public IEnumerable<Node> LoadVersions()
         {
+            if (this.Id < 1)
+                return Array.Empty<Node>();
             Security.Assert(PermissionType.RecallOldVersion, PermissionType.Open);
             if (Security.HasPermission(PermissionType.OpenMinor))
                 return LoadAllVersions();
@@ -2240,8 +2679,9 @@ namespace SenseNet.ContentRepository.Storage
         }
 
         /// <summary>
-        /// Loads the appropiate <see cref="Node"/> by the given versionId.
+        /// Loads a <see cref="Node"/> by the provided versionId.
         /// </summary>
+        /// <param name="versionId">Version id.</param>
         public static Node LoadNodeByVersionId(int versionId)
         {
 
@@ -2249,9 +2689,31 @@ namespace SenseNet.ContentRepository.Storage
             if (head == null)
                 return null;
 
-            SecurityHandler.Assert(head, PermissionType.RecallOldVersion, PermissionType.Open);
+            Providers.Instance.SecurityHandler.Assert(head, PermissionType.RecallOldVersion, PermissionType.Open);
 
-            var token = DataBackingStore.GetNodeData(head, versionId);
+            var token = Providers.Instance.DataStore
+                .LoadNodeAsync(head, versionId, CancellationToken.None).GetAwaiter().GetResult();
+
+            Node node = null;
+            if (token.NodeData != null)
+                node = CreateTargetClass(token);
+            return node;
+        }
+        /// <summary>
+        /// Loads a <see cref="Node"/> by the provided versionId.
+        /// </summary>
+        /// <param name="versionId">Version id.</param>
+        /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
+        public static async Task<Node> LoadNodeByVersionIdAsync(int versionId, CancellationToken cancellationToken)
+        {
+            var head = await NodeHead.GetByVersionIdAsync(versionId, cancellationToken).ConfigureAwait(false);
+            if (head == null)
+                return null;
+
+            Providers.Instance.SecurityHandler.Assert(head, PermissionType.RecallOldVersion, PermissionType.Open);
+
+            var token = await Providers.Instance.DataStore
+                .LoadNodeAsync(head, versionId, cancellationToken).ConfigureAwait(false);
 
             Node node = null;
             if (token.NodeData != null)
@@ -2269,7 +2731,8 @@ namespace SenseNet.ContentRepository.Storage
             if (nodeHead != null)
             {
                 //  Reload by nodeHead.LastMinorVersionId
-                var token = DataBackingStore.GetNodeData(nodeHead, nodeHead.LastMinorVersionId);
+                var token =  DataStore.LoadNodeAsync(nodeHead, nodeHead.LastMinorVersionId, CancellationToken.None)
+                    .GetAwaiter().GetResult();
                 var sharedData = token.NodeData;
                 sharedData.IsShared = true;
                 SetNodeData(sharedData);
@@ -2284,7 +2747,7 @@ namespace SenseNet.ContentRepository.Storage
             if (nodeHead == null)
                 throw new ContentNotFoundException(String.Format("Version of a content was not found. VersionId: {0}, old Path: {1}", this.VersionId, this.Path));
 
-            var token = DataBackingStore.GetNodeData(nodeHead, this.VersionId);
+            var token =  DataStore.LoadNodeAsync(nodeHead, this.VersionId, CancellationToken.None).GetAwaiter().GetResult();
             var sharedData = token.NodeData;
             sharedData.IsShared = true;
             SetNodeData(sharedData);
@@ -2298,7 +2761,15 @@ namespace SenseNet.ContentRepository.Storage
         /// <summary>
         /// Stores the modifications of this <see cref="Node"/> instance to the database.
         /// </summary>
+        [Obsolete("Use async version instead.", true)]
         public virtual void Save()
+        {
+            SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
+        }
+        /// <summary>
+        /// Asynchronously stores the modifications of this <see cref="Node"/> instance to the database.
+        /// </summary>
+        public virtual async Task SaveAsync(CancellationToken cancel)
         {
             var settings = new NodeSaveSettings
             {
@@ -2308,8 +2779,9 @@ namespace SenseNet.ContentRepository.Storage
             };
             settings.ExpectedVersionId = settings.CurrentVersionId;
             settings.Validate();
-            this.Save(settings);
+            await SaveAsync(settings, cancel).ConfigureAwait(false);
         }
+
         private static IDictionary<string, object> CollectAllProperties(NodeData data)
         {
             return data.GetAllValues();
@@ -2341,7 +2813,7 @@ namespace SenseNet.ContentRepository.Storage
             };
         }
 
-        private void SaveCopied(NodeSaveSettings settings)
+        private async Task SaveCopiedAsync(NodeSaveSettings settings, CancellationToken cancel)
         {
             using (var op = SnTrace.ContentOperation.StartOperation("Node.SaveCopied"))
             {
@@ -2383,7 +2855,7 @@ namespace SenseNet.ContentRepository.Storage
                     throw new InvalidOperationException("Cannot save deleted node.");
 
                 // Check permissions: got to have AddNew permission on the parent
-                SecurityHandler.Assert(this.ParentId, PermissionType.AddNew);
+                Providers.Instance.SecurityHandler.Assert(this.ParentId, PermissionType.AddNew);
 
                 RepositoryPath.CheckValidName(this.Name);
 
@@ -2398,7 +2870,7 @@ namespace SenseNet.ContentRepository.Storage
                 // Update the modification
                 
                 // update to current
-                DateTime now = DataProvider.Current.RoundDateTime(DateTime.UtcNow);
+                var now = DataStore.RoundDateTime(DateTime.UtcNow);
                 this.ModificationDate = now;
                 this.Data.ModifiedById = currentUserId;
                 this.VersionModificationDate = now;
@@ -2409,7 +2881,8 @@ namespace SenseNet.ContentRepository.Storage
                 var thisPath = RepositoryPath.Combine(parentPath, this.Name);
 
                 // save
-                DataBackingStore.SaveNodeData(this, settings, SearchManager.GetIndexPopulator(), thisPath, thisPath);
+                await SaveNodeDataAsync(this, settings, Providers.Instance.SearchManager.GetIndexPopulator(),
+                        thisPath, thisPath, cancel).ConfigureAwait(false);
 
                 // <L2Cache>
                 StorageContext.L2Cache.Clear();
@@ -2440,15 +2913,27 @@ namespace SenseNet.ContentRepository.Storage
         /// The generated <see cref="VersionNumber"/> depends on the requested 
         /// <see cref="VersionRaising"/> mode and the given <see cref="VersionStatus"/>.
         /// </summary>
+        [Obsolete("Use async version instead.", true)]
         public void Save(VersionRaising versionRaising, VersionStatus versionStatus)
         {
-            Save(versionRaising, versionStatus, false);
+            SaveAsync(versionRaising, versionStatus, CancellationToken.None).GetAwaiter().GetResult();
         }
-        internal void Save(VersionRaising versionRaising, VersionStatus versionStatus, bool takingLockOver)
+        /// <summary>
+        /// Asynchronously stores the modifications of this <see cref="Node"/> instance to the database.
+        /// The generated <see cref="VersionNumber"/> depends on the requested 
+        /// <see cref="VersionRaising"/> mode and the given <see cref="VersionStatus"/>.
+        /// </summary>
+        public Task SaveAsync(VersionRaising versionRaising, VersionStatus versionStatus, CancellationToken cancel)
+        {
+            return SaveAsync(versionRaising, versionStatus, false, cancel);
+        }
+
+        internal async Task SaveAsync(VersionRaising versionRaising, VersionStatus versionStatus, bool takingLockOver,
+            CancellationToken cancel)
         {
             var settings = new NodeSaveSettings { Node = this, HasApproving = false, TakingLockOver = takingLockOver };
             var curVer = settings.CurrentVersion;
-            var history = NodeHead.Get(this.Id).Versions;
+            var history = (await NodeHead.GetAsync(this.Id, cancel).ConfigureAwait(false)).Versions;
             var biggest = history.OrderBy(v => v.VersionNumber.VersionString).LastOrDefault();
             var biggestVer = biggest == null ? curVer : biggest.VersionNumber;
 
@@ -2473,7 +2958,7 @@ namespace SenseNet.ContentRepository.Storage
                     break;
             }
 
-            Save(settings);
+            await SaveAsync(settings, cancel).ConfigureAwait(false);
         }
         #endregion
 
@@ -2482,7 +2967,17 @@ namespace SenseNet.ContentRepository.Storage
         /// The tasks of storing depend on the given <see cref="NodeSaveSettings"/>.
         /// </summary>
         /// <param name="settings">Describes the tasks and algorithms for persisting the node.</param>
+        [Obsolete("Use async version instead.", true)]
         public virtual void Save(NodeSaveSettings settings)
+        {
+            SaveAsync(settings, CancellationToken.None).GetAwaiter().GetResult();
+        }
+        /// <summary>
+        /// Asynchronously stores the modifications of this <see cref="Node"/> instance to the database.
+        /// The tasks of storing depend on the given <see cref="NodeSaveSettings"/>.
+        /// </summary>
+        /// <param name="settings">Describes the tasks and algorithms for persisting the node.</param>
+        public virtual async Task SaveAsync(NodeSaveSettings settings, CancellationToken cancel)
         {
             var isNew = this.IsNew;
             var previousSavingState = this.SavingState;
@@ -2490,7 +2985,7 @@ namespace SenseNet.ContentRepository.Storage
             if (_data != null)
                 _data.SavingTimer.Restart();
 
-            var lockBefore = this.Version == null ? false : this.Version.Status == VersionStatus.Locked;
+            var lockBefore = this.Version != null && this.Version.Status == VersionStatus.Locked;
             if (isNew)
                 CreatingInProgress = true;
             var creating = CreatingInProgress;
@@ -2499,7 +2994,7 @@ namespace SenseNet.ContentRepository.Storage
 
             if (_copying)
             {
-                SaveCopied(settings);
+                await SaveCopiedAsync(settings, cancel).ConfigureAwait(false);
                 if (_data != null)
                     _data.SavingTimer.Stop();
                 return;
@@ -2508,7 +3003,7 @@ namespace SenseNet.ContentRepository.Storage
             // If this is a regular save (like in most cases), saving state will be Finalized. Otherwise 
             // it can be Creating if it is new or Modifying if it already exists. ModifyingLocked state
             // was created to let the finalizing code know that it should not check in the content
-            // at the end of the multistep saving process.
+            // at the end of the multi-step saving process.
             this.SavingState = settings.MultistepSaving
                                    ? (isNew
                                         ? ContentSavingState.Creating
@@ -2548,8 +3043,8 @@ namespace SenseNet.ContentRepository.Storage
             var renamed = originalName.ToLower() != thisName.ToLower();
 
             var msg = renamed
-                ? string.Format("NODE.RENAME Id: {0}): {1} -> {2}, ParentPath: {3}", Id, originalName, thisName, ParentPath)
-                : string.Format("NODE.SAVE Id: {0}, VersionId: {1}, Version: {2}, Name: {3}, ParentPath: {4}", Id, VersionId, Version, thisName, ParentPath);
+                ? $"NODE.RENAME Id: {Id}): {originalName} -> {thisName}, ParentPath: {ParentPath}"
+                : $"NODE.SAVE Id: {Id}, VersionId: {VersionId}, Version: {Version}, Name: {thisName}, ParentPath: {ParentPath}";
             using (var audit = new AuditBlock(new AuditEvent("ContentSaved", 1), msg, new Dictionary<string, object>
             { { "Id", this.Id }, { "Path", this.Path } }))
             {
@@ -2563,7 +3058,7 @@ namespace SenseNet.ContentRepository.Storage
                     if (!isElevatedMode ||
                         ElevatedModificationVisibilityRule.EvaluateRule(this))
                     {
-                        var now = DataProvider.Current.RoundDateTime(DateTime.UtcNow);
+                        var now = DataStore.RoundDateTime(DateTime.UtcNow);
                         if (!_data.VersionModificationDateChanged)
                             this.VersionModificationDate = now;
                         if (!_data.VersionModifiedByIdChanged)
@@ -2582,10 +3077,8 @@ namespace SenseNet.ContentRepository.Storage
                             var list = this.LoadContentList();
                             if (list != null)
                             {
-                                var ownerWhenVsitor = list.GetReference<Node>("OwnerWhenVisitor");
-                                var adminId = ownerWhenVsitor != null
-                                                ? ownerWhenVsitor.Id
-                                                : Identifiers.AdministratorUserId;
+                                var ownerWhenVisitor = list.GetReference<Node>("OwnerWhenVisitor");
+                                var adminId = ownerWhenVisitor?.Id ?? Identifiers.AdministratorUserId;
 
                                 this.Data.VersionCreatedById = adminId;
                                 this.Data.VersionModifiedById = adminId;
@@ -2601,7 +3094,7 @@ namespace SenseNet.ContentRepository.Storage
                         }
                     }
 
-                    // collect changed field values for logging and info for nodeobservers
+                    // collect changed field values for logging and info for node observers
                     IEnumerable<ChangedData> changedData = null;
                     if (!isNewNode)
                         changedData = this.Data.GetChangedValues();
@@ -2643,6 +3136,8 @@ namespace SenseNet.ContentRepository.Storage
                         customData = args.GetCustomData();
                     }
 
+                    AssertSaving(changedData);
+
                     BenchmarkCounter.IncrementBy(BenchmarkCounter.CounterName.BeforeSaveToDb, _data != null ? _data.SavingTimer.ElapsedTicks : 0);
                     if (_data != null)
                         _data.SavingTimer.Restart();
@@ -2650,18 +3145,19 @@ namespace SenseNet.ContentRepository.Storage
                     // save
                     TreeLock treeLock = null;
                     if (renamed)
-                        treeLock = TreeLock.Acquire(this.ParentPath + "/" + this.Name, originalPath);
+                        treeLock = await Providers.Instance.TreeLock.AcquireAsync(CancellationToken.None, this.ParentPath + "/" + this.Name, originalPath).ConfigureAwait(false);
                     else
-                        TreeLock.AssertFree(this.ParentPath + "/" + this.Name);
+                        await Providers.Instance.TreeLock.AssertFreeAsync(CancellationToken.None, this.ParentPath + "/" + this.Name).ConfigureAwait(false);
+
                     try
                     {
-                        this.Data.PreloadTextProperties();
-                        DataBackingStore.SaveNodeData(this, settings, SearchManager.GetIndexPopulator(), originalPath, newPath);
+                        await this.Data.PreloadTextPropertiesAsync(cancel).ConfigureAwait(false);
+                        await SaveNodeDataAsync(this, settings, Providers.Instance.SearchManager.GetIndexPopulator(),
+                            originalPath, newPath, cancel).ConfigureAwait(false);
                     }
                     finally
                     {
-                        if (treeLock != null)
-                            treeLock.Dispose();
+                        treeLock?.Dispose();
                     }
 
                     // <L2Cache>
@@ -2728,9 +3224,17 @@ namespace SenseNet.ContentRepository.Storage
         }
 
         /// <summary>
-        /// Ends the multistep saving process and makes the Content available for modification.
+        /// Ends the multi-step saving process and makes the Content available for modification.
         /// </summary>
+        [Obsolete("Use async version instead.", true)]
         public virtual void FinalizeContent()
+        {
+            FinalizeContentAsync(CancellationToken.None).GetAwaiter().GetResult();
+        }
+        /// <summary>
+        /// Asynchronously ends the multi-step saving process and makes the Content available for modification.
+        /// </summary>
+        public virtual async Task FinalizeContentAsync(CancellationToken cancel)
         {
             if (SavingState == ContentSavingState.Finalized)
                 throw new InvalidOperationException("Cannot finalize the content " + this.Path);
@@ -2757,7 +3261,8 @@ namespace SenseNet.ContentRepository.Storage
                     ExpectedVersionId = this.VersionId,
                     MultistepSaving = false
                 };
-                DataBackingStore.SaveNodeData(this, settings, SearchManager.GetIndexPopulator(), Path, Path);
+                await SaveNodeDataAsync(this, settings, Providers.Instance.SearchManager.GetIndexPopulator(),
+                    Path, Path, cancel).ConfigureAwait(false);
 
                 // events
                 if (this.Version.Status != VersionStatus.Locked)
@@ -2779,7 +3284,7 @@ namespace SenseNet.ContentRepository.Storage
                 this.Version = settings.ExpectedVersion;
 
                 MakePrivateData();
-                _data.VersionCreationDate = DataProvider.Current.RoundDateTime(DateTime.UtcNow);
+                _data.VersionCreationDate = DataStore.RoundDateTime(DateTime.UtcNow);
             }
 
             if (settings.LockerUserId != null)
@@ -2895,25 +3400,223 @@ namespace SenseNet.ContentRepository.Storage
             if (this.IsContentType)
                 return;
 
-            switch (Cache.CacheContentAfterSaveMode)
+            switch (CacheConfiguration.CacheContentAfterSaveMode)
             {
-                case Cache.CacheContentAfterSaveOption.None:
+                case CacheConfiguration.CacheContentAfterSaveOption.None:
                     // do nothing
                     break;
-                case Cache.CacheContentAfterSaveOption.Containers:
+                case CacheConfiguration.CacheContentAfterSaveOption.Containers:
                     // cache IFolders only
                     if (this is IFolder)
-                        DataBackingStore.CacheNodeData(this._data);
+                        DataStore.CacheNodeData(this._data);
                     break;
-                case Cache.CacheContentAfterSaveOption.All:
+                case CacheConfiguration.CacheContentAfterSaveOption.All:
                     // cache every node
-                    DataBackingStore.CacheNodeData(this._data);
+                    DataStore.CacheNodeData(this._data);
                     break;
             }
         }
 
+        #region /* ------------------------------------------------------------------------- SaveNodeData */
+        private const int maxDeadlockIterations = 3;
+        private const int sleepIfDeadlock = 1000;
 
-        #region // ================================================================================================= Move methods
+        private static async Task SaveNodeDataAsync(Node node, NodeSaveSettings settings, IIndexPopulator populator,
+            string originalPath, string newPath, CancellationToken cancel)
+        {
+            var isNewNode = node.Id == 0;
+            var isOwnerChanged = node.Data.IsPropertyChanged("OwnerId");
+            if (!isNewNode && isOwnerChanged)
+                node.Security.Assert(PermissionType.TakeOwnership);
+
+            var data = node.Data;
+            var attempt = 0;
+
+            using (var op = SnTrace.Database.StartOperation("SaveNodeData"))
+            {
+                while (true)
+                {
+                    attempt++;
+
+                    var deadlockException = await SaveNodeDataAttemptAsync(node, settings, populator, originalPath, newPath, cancel)
+                        .ConfigureAwait(false);
+                    if (deadlockException == null)
+                        break;
+
+                    SnTrace.Database.Write("DEADLOCK detected. Attempt: {0}/{1}, NodeId:{2}, Version:{3}, Path:{4}",
+                        attempt, maxDeadlockIterations, node.Id, node.Version, node.Path);
+
+                    if (attempt >= maxDeadlockIterations)
+                        throw new DataException(string.Format("Error saving node. Id: {0}, Path: {1}", node.Id, node.Path), deadlockException);
+
+                    SnLog.WriteWarning("Deadlock detected in SaveNodeData", properties:
+                        new Dictionary<string, object>
+                        {
+                            {"Id: ", node.Id},
+                            {"Path: ", node.Path},
+                            {"Version: ", node.Version},
+                            {"Attempt: ", attempt}
+                        });
+
+                    System.Threading.Thread.Sleep(sleepIfDeadlock);
+                }
+                op.Successful = true;
+            }
+
+            try
+            {
+                if (isNewNode)
+                {
+                    await Providers.Instance.SecurityHandler.CreateSecurityEntityAsync(node.Id, node.ParentId, node.OwnerId, cancel)
+                        .ConfigureAwait(false);
+                }
+                else if (isOwnerChanged)
+                {
+                    await Providers.Instance.SecurityHandler.ModifyEntityOwnerAsync(node.Id, node.OwnerId, cancel)
+                        .ConfigureAwait(false);
+                }
+            }
+            catch (EntityNotFoundException e)
+            {
+                SnLog.WriteException(e, $"Error during creating or modifying security entity: {node.Id}. Original message: {e}",
+                    EventId.Security);
+            }
+            catch (SecurityStructureException) // suppressed
+            {
+                // no need to log this: somebody else already created or modified this security entity
+            }
+
+            if (isNewNode)
+                SnTrace.ContentOperation.Write("Node created. Id:{0}, Path:{1}", data.Id, data.Path);
+            else
+                SnTrace.ContentOperation.Write("Node updated. Id:{0}, Path:{1}", data.Id, data.Path);
+        }
+        private static async Task<Exception> SaveNodeDataAttemptAsync(Node node, NodeSaveSettings settings, IIndexPopulator populator, string originalPath, string newPath, CancellationToken cancel)
+        {
+            IndexDocumentData indexDocument = null;
+            bool hasBinary = false;
+
+            var data = node.Data;
+            var isNewNode = data.Id == 0;
+
+            var msg = "Saving Node#" + node.Id + ", " + node.ParentPath + "/" + node.Name;
+
+            using (var op = SnTrace.Database.StartOperation(msg))
+            {
+                try
+                {
+                    // collect data for populator
+                    var populatorData = populator.BeginPopulateNode(node, settings, originalPath, newPath);
+
+                    if (settings.NodeHead != null)
+                    {
+                        settings.LastMajorVersionIdBefore = settings.NodeHead.LastMajorVersionId;
+                        settings.LastMinorVersionIdBefore = settings.NodeHead.LastMinorVersionId;
+                    }
+
+                    // Finalize path
+                    string path;
+
+                    if (data.Id != Identifiers.PortalRootId)
+                    {
+                        var parent = NodeHead.Get(data.ParentId);
+                        if (parent == null)
+                            throw new ContentNotFoundException(data.ParentId.ToString());
+                        path = RepositoryPath.Combine(parent.Path, data.Name);
+                    }
+                    else
+                    {
+                        path = Identifiers.RootPath;
+                    }
+                    Node.AssertPath(path);
+                    data.Path = path;
+
+                    // Store in the database
+                    int lastMajorVersionId, lastMinorVersionId;
+
+                    var head = await Providers.Instance.DataStore.SaveNodeAsync(data, settings, cancel).ConfigureAwait(false);
+                    lastMajorVersionId = settings.LastMajorVersionIdAfter;
+                    lastMinorVersionId = settings.LastMinorVersionIdAfter;
+                    node.RefreshVersionInfo(head);
+
+                    // here we re-create the node head to insert it into the cache and refresh the version info);
+                    if (lastMajorVersionId > 0 || lastMinorVersionId > 0)
+                    {
+                        if (!settings.DeletableVersionIds.Contains(node.VersionId))
+                        {
+                            // Elevation: we need to create the index document with full
+                            // control to avoid field access errors (indexing must be independent
+                            // from the current users permissions).
+                            using (new SystemAccount())
+                            {
+                                var result = await Providers.Instance.DataStore
+                                    .SaveIndexDocumentAsync(node, true, isNewNode, cancel)
+                                    .ConfigureAwait(false);
+                                indexDocument = result.IndexDocumentData;
+                                hasBinary = result.HasBinary;
+                            }
+                        }
+                    }
+
+                    // populate index only if it is enabled on this content (e.g. preview images will be skipped)
+                    using (var op2 = SnTrace.Index.StartOperation("Indexing node"))
+                    {
+                        if (node.IsIndexingEnabled)
+                        {
+                            using (new SystemAccount())
+                                await populator.CommitPopulateNodeAsync(populatorData, indexDocument, cancel).ConfigureAwait(false);
+                        }
+
+                        if (indexDocument != null && hasBinary)
+                        {
+                            using (new SystemAccount())
+                            {
+                                indexDocument = await Providers.Instance.DataStore.SaveIndexDocumentAsync(node, indexDocument, cancel).ConfigureAwait(false);
+                                await populator.FinalizeTextExtractingAsync(populatorData, indexDocument, cancel).ConfigureAwait(false);
+                            }
+                        }
+                        op2.Successful = true;
+                    }
+                }
+                catch (TransactionDeadlockedException tde)
+                {
+                    return tde;
+                }
+                catch (AggregateException ae)
+                {
+                    if (ae.InnerException is TransactionDeadlockedException)
+                        return ae.InnerException;
+                    throw;
+                }
+                catch (Exception e)
+                {
+                    var ee = SavingExceptionHelper(data, e);
+                    if (ee == e)
+                        throw;
+                    throw ee;
+                }
+                op.Successful = true;
+            }
+            return null;
+        }
+        private static Exception SavingExceptionHelper(NodeData data, Exception catchedEx)
+        {
+            var message = "The content cannot be saved.";
+            if (catchedEx.Message.StartsWith("Cannot insert duplicate key"))
+            {
+                message += " A content with the name you specified already exists.";
+
+                var appExc = new NodeAlreadyExistsException(message, catchedEx); // new ApplicationException(message, catchedEx);
+                appExc.Data.Add("NodeId", data.Id);
+                appExc.Data.Add("Path", data.Path);
+                appExc.Data.Add("OriginalPath", data.OriginalPath);
+
+                appExc.Data.Add("ErrorCode", "ExistingNode");
+                return appExc;
+            }
+            return catchedEx;
+        }
+        #endregion
 
         //TODO: Node.GetChildTypesToAllow(int nodeId): check SQL procedure algorithm. See issue #259
         /// <summary>
@@ -2921,7 +3624,8 @@ namespace SenseNet.ContentRepository.Storage
         /// </summary>
         public static IEnumerable<NodeType> GetChildTypesToAllow(int nodeId)
         {
-            return DataProvider.Current.LoadChildTypesToAllow(nodeId);
+            return Providers.Instance.DataStore
+                .LoadChildTypesToAllowAsync(nodeId, CancellationToken.None).GetAwaiter().GetResult();
         }
         //TODO: Node.GetChildTypesToAllow(): check SQL procedure algorithm. See issue #259
         /// <summary>
@@ -2929,11 +3633,15 @@ namespace SenseNet.ContentRepository.Storage
         /// </summary>
         public IEnumerable<NodeType> GetChildTypesToAllow()
         {
-            return DataProvider.Current.LoadChildTypesToAllow(this.Id);
+            return DataStore.LoadChildTypesToAllowAsync(this.Id, CancellationToken.None).GetAwaiter().GetResult();
         }
 
+        #region // ================================================================================================= Move methods
+
+        private enum MoveOption { Regular, ToTrash, FromTrash }
+
         /// <summary>
-        /// Moves the <see cref="Node"/> indentified by the source path to another location. 
+        /// Moves the <see cref="Node"/> identified by the source path to another location. 
         /// The destination <see cref="Node"/> is also identified by path. 
         /// </summary>
         /// <remarks>Use this method if you do not want to instantiate the <see cref="Node"/>s.</remarks>
@@ -2950,22 +3658,19 @@ namespace SenseNet.ContentRepository.Storage
             targetNode.AssertLock();
             sourceNode.MoveTo(targetNode);
         }
+
         /// <summary>
-        /// Moves the <see cref="Node"/> instance to another loacation. The new location is a <see cref="Node"/> instance 
+        /// Moves the <see cref="Node"/> instance to another location. The new location is a <see cref="Node"/> instance 
         /// that will be the parent <see cref="Node"/>.
         /// </summary>
         public virtual void MoveTo(Node target)
         {
             if (target == null)
-                throw new ArgumentNullException("target");
-            MoveTo(target, this.NodeTimestamp, target.NodeTimestamp);
-        }
-        private void MoveTo(Node target, long sourceTimestamp, long targetTimestamp)
-        {
-            this.AssertLock();
+                throw new ArgumentNullException(nameof(target));
 
-            if (target == null)
-                throw new ArgumentNullException("target");
+            var moveOption = GetMoveOption(this, target);
+            this.AssertLock();
+            AssertMoving(target);
 
             // check permissions
             this.Security.AssertSubtree(PermissionType.Delete);
@@ -2993,19 +3698,41 @@ namespace SenseNet.ContentRepository.Storage
             {                { "Id", Id }, {"Path", Path }, {"Target", targetPath }            }))
             {
                 IDictionary<string, object> customData;
-                using (var treeLock = TreeLock.Acquire(this.Path, RepositoryPath.Combine(target.Path, this.Name)))
+                using (Providers.Instance.TreeLock.AcquireAsync(CancellationToken.None, this.Path, RepositoryPath.Combine(target.Path, this.Name)).GetAwaiter().GetResult())
                 {
-                    var args = new CancellableNodeOperationEventArgs(this, target, CancellableNodeEvent.Moving);
-                    FireOnMoving(args);
-                    if (args.Cancel)
-                        throw new CancelNodeEventException(args.CancelMessage, args.EventType, this);
-                    customData = args.GetCustomData();
+                    Providers.Instance.ContentProtector.AssertIsDeletable(this.Path);
+
+                    CancellableNodeEventArgs cancellableEventArgs;
+
+                    switch (moveOption)
+                    {
+                        case MoveOption.Regular:
+                            var eventArgs = new CancellableNodeOperationEventArgs(this, target, CancellableNodeEvent.Moving);
+                            cancellableEventArgs = eventArgs;
+                            FireOnMoving(eventArgs);
+                            break;
+                        case MoveOption.ToTrash:
+                            cancellableEventArgs = new CancellableNodeEventArgs(target, CancellableNodeEvent.Deleting);
+                            FireOnDeleting(cancellableEventArgs);
+                            break;
+                        case MoveOption.FromTrash:
+                            cancellableEventArgs = new CancellableNodeEventArgs(target, CancellableNodeEvent.Restoring);
+                            FireOnRestoring(cancellableEventArgs);
+                            break;
+                        default:
+                            throw new ArgumentOutOfRangeException(nameof(moveOption), moveOption, null);
+                    }
+
+                    if (cancellableEventArgs.Cancel)
+                        throw new CancelNodeEventException(cancellableEventArgs.CancelMessage, cancellableEventArgs.EventType, this);
+                    customData = cancellableEventArgs.GetCustomData();
 
                     var pathToInvalidate = String.Concat(this.Path, "/");
 
                     try
                     {
-                        DataProvider.Current.MoveNode(this.Id, target.Id, sourceTimestamp, targetTimestamp);
+                        DataStore.MoveNodeAsync(this.Data, target.Id, CancellationToken.None)
+                            .GetAwaiter().GetResult();
                     }
                     catch (DataOperationException e) // rethrow
                     {
@@ -3015,13 +3742,14 @@ namespace SenseNet.ContentRepository.Storage
                         throw new ApplicationException("Cannot move", e);
                     }
 
-                    SecurityHandler.MoveEntity(this.Id, target.Id);
+                    Providers.Instance.SecurityHandler.MoveEntityAsync(this.Id, target.Id, CancellationToken.None)
+                        .GetAwaiter().GetResult();
 
                     PathDependency.FireChanged(pathToInvalidate);
                     PathDependency.FireChanged(this.Path);
 
-                    var populator = SearchManager.GetIndexPopulator();
-                    populator.DeleteTree(this.Path, this.Id);
+                    var populator = Providers.Instance.SearchManager.GetIndexPopulator();
+                    populator.DeleteTreeAsync(this.Path, this.Id, CancellationToken.None).GetAwaiter().GetResult();
 
                     // <L2Cache>
                     StorageContext.L2Cache.Clear();
@@ -3034,7 +3762,8 @@ namespace SenseNet.ContentRepository.Storage
                         var acceptedLevel = GetAcceptedLevel(userAccessLevel, VersionNumber.LastAccessible);
                         var versionId = GetVersionId(nodeHead, acceptedLevel != AccessLevel.Header ? acceptedLevel : AccessLevel.Major, VersionNumber.LastAccessible);
 
-                        var sharedData = DataBackingStore.GetNodeData(nodeHead, versionId);
+                        var sharedData =  DataStore.LoadNodeAsync(nodeHead, versionId, CancellationToken.None)
+                            .GetAwaiter().GetResult();
                         var privateData = NodeData.CreatePrivateData(sharedData.NodeData);
                         SetNodeData(privateData);
                     }
@@ -3044,16 +3773,42 @@ namespace SenseNet.ContentRepository.Storage
                     }
 
                     using (new SystemAccount())
-                        populator.AddTree(targetPath, this.Id);
+                        populator.AddTreeAsync(targetPath, this.Id, CancellationToken.None).GetAwaiter().GetResult();
 
                 } // end lock
 
                 SnLog.WriteAudit(AuditEvent.ContentMoved, GetLoggerPropertiesAfterMove(new object[] { this, originalPath, targetPath }));
 
-                FireOnMoved(target, customData, originalPath);
+                switch (moveOption)
+                {
+                    case MoveOption.Regular:
+                        FireOnMoved(target, customData, originalPath);
+                        break;
+                    case MoveOption.ToTrash:
+                        FireOnDeleted(customData);
+                        break;
+                    case MoveOption.FromTrash:
+                        FireOnRestored(customData);
+                        break;
+                    default:
+                        throw new ArgumentOutOfRangeException(nameof(moveOption), moveOption, null);
+                }
 
                 audit.Successful = true;
             }
+        }
+
+        private static readonly string TrashPath = "/Root/Trash/TrashBag";
+        private MoveOption GetMoveOption(Node source, Node target)
+        {
+            var sourceIsInTrash = source.Path.StartsWith(TrashPath, StringComparison.OrdinalIgnoreCase);
+            var targetIsInTrash = target.Path.StartsWith(TrashPath, StringComparison.OrdinalIgnoreCase);
+
+            return sourceIsInTrash == targetIsInTrash
+                ? MoveOption.Regular
+                : sourceIsInTrash
+                    ? MoveOption.FromTrash
+                    : MoveOption.ToTrash;
         }
 
         /// <summary>
@@ -3102,7 +3857,7 @@ namespace SenseNet.ContentRepository.Storage
         #region // ================================================================================================= Copy methods
 
         /// <summary>
-        /// Copy the <see cref="Node"/> indentified by the source path to another location. 
+        /// Copy the <see cref="Node"/> identified by the source path to another location. 
         /// The destination <see cref="Node"/> is also identified by path. 
         /// </summary>
         /// <remarks>Use this method if you do not want to instantiate the <see cref="Node"/>s.</remarks>
@@ -3315,37 +4070,12 @@ namespace SenseNet.ContentRepository.Storage
 
         private string CheckListAndItemCopyingConditions(Node target)
         {
-            string msg = null;
-            bool sourceIsOuter = this.ContentListType == null;
-            bool sourceIsList = !sourceIsOuter && this.ContentListId == 0;
-            bool sourceIsItem = !sourceIsOuter && this.ContentListId != 0;
-
-            //HACK: sourceIsSystemFolder
-            bool sourceIsSystemFolder = this.NodeType.IsInstaceOfOrDerivedFrom("SystemFolder");
-
-            bool targetIsOuter = target.ContentListType == null;
-            bool targetIsList = !targetIsOuter && target.ContentListId == 0;
-            bool targetIsItem = !targetIsOuter && target.ContentListId != 0;
-            if (sourceIsOuter && !targetIsOuter && !sourceIsSystemFolder)
-            {
-                msg = "Cannot copy outer item into a list. ";
-            }
-            else if (sourceIsList && !targetIsOuter)
-            {
-                msg = "Cannot copy a list into an another list. ";
-            }
-            else if (sourceIsItem)
-            {
-                // change: we don't mind if somebody copies an item out from the list
-                // (it will lose the list fields though...)
-                if (targetIsOuter)
-                    msg = null; // "Cannot copy a list item out from the list. ";
-                else if (targetIsList && this.ContentListType != target.ContentListType)
-                    msg = "Cannot copy a list item into an another list. ";
-                else if (targetIsItem && this.ContentListId != target.ContentListId)
-                    msg = "Cannot copy a list item into an another list. ";
-            }
-            return msg;
+            var sourceIsOuter = this.ContentListType == null;
+            var sourceIsList = !sourceIsOuter && this.ContentListId == 0;
+            var targetIsOuter = target.ContentListType == null;
+            if (sourceIsList && !targetIsOuter)
+                return "Cannot copy a list into an another list. ";
+            return null;
         }
 
         private string GenerateCopyName(int index)
@@ -3372,8 +4102,8 @@ namespace SenseNet.ContentRepository.Storage
                 targetNodePath = RepositoryPath.GetParentPath(targetNodePath);
                 var targetNode = Node.LoadNode(targetNodePath);
                 var copy = sourceNode.MakeCopy(targetNode, newName);
-                copy.Save();
-                CopyExplicitPermissionsTo(sourceNode, copy);
+                copy.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
+                CopyExplicitPermissionsToAsync(sourceNode, copy, CancellationToken.None).GetAwaiter().GetResult();
                 if (first)
                 {
                     copyOfSource = copy;
@@ -3384,22 +4114,22 @@ namespace SenseNet.ContentRepository.Storage
             return copyOfSource;
         }
 
-        private void CopyExplicitPermissionsTo(Node sourceNode, Node targetNode)
+        private async Task CopyExplicitPermissionsToAsync(Node sourceNode, Node targetNode, CancellationToken cancel)
         {
             AccessProvider.ChangeToSystemAccount();
             try
             {
-                var entriesToCopy = SecurityHandler.GetExplicitEntriesAsSystemUser(sourceNode.Id, null, EntryType.Normal);
+                var entriesToCopy = Providers.Instance.SecurityHandler.GetExplicitEntriesAsSystemUser(sourceNode.Id, null, EntryType.Normal);
                 if (entriesToCopy.Count == 0)
                     return;
 
-                var aclEd = SecurityHandler.CreateAclEditor();
+                var aclEd = Providers.Instance.SecurityHandler.CreateAclEditor();
                 foreach (var entry in entriesToCopy)
                     aclEd.Set(targetNode.Id, entry.IdentityId, entry.LocalOnly, entry.AllowBits, entry.DenyBits);
-                aclEd.Apply();
+                await aclEd.ApplyAsync(cancel).ConfigureAwait(false);
 
                 if (!targetNode.IsInherited)
-                    targetNode.Security.RemoveBreakInheritance();
+                    await targetNode.Security.RemoveBreakInheritanceAsync(cancel).ConfigureAwait(false);
             }
             finally
             {
@@ -3478,67 +4208,86 @@ namespace SenseNet.ContentRepository.Storage
         /// Deletes a <see cref="Node"/> and all of its contents from the database. This operation removes all child <see cref="Node"/>s too.
         /// </summary>
         /// <param name="sourcePath">The path of the <see cref="Node"/> that will be deleted.</param>
-        [Obsolete("DeletePhysical is obsolete. Use ForceDelete to delete Node permanently.")]
+        [Obsolete("DeletePhysical is obsolete. Use ForceDelete to delete Node permanently.", true)]
         public static void DeletePhysical(string sourcePath)
         {
-            var sourceNode = Node.LoadNode(sourcePath);
-            if (sourceNode == null)
-                throw new InvalidOperationException(SR.GetString(SR.Exceptions.Operations.DeleteFailed_ContentDoesNotExistWithPath_1, sourcePath));
-            sourceNode.Delete();
+            throw new NotSupportedException();
         }
         /// <summary>
         /// Deletes a <see cref="Node"/> and all of its contents from the database. This operation removes all child <see cref="Node"/>s too.
         /// </summary>
         /// <param name="nodeId">Identifier of the <see cref="Node"/> that will be deleted.</param>
-        [Obsolete("DeletePhysical is obsolete. Use ForceDelete to delete Node permanently.")]
+        [Obsolete("DeletePhysical is obsolete. Use ForceDelete to delete Node permanently.", true)]
         public static void DeletePhysical(int nodeId)
         {
-            var sourceNode = Node.LoadNode(nodeId);
-            if (sourceNode == null)
-                throw new InvalidOperationException(SR.GetString(SR.Exceptions.Operations.DeleteFailed_ContentDoesNotExistWithId_1, nodeId));
-            sourceNode.Delete();
+            throw new NotSupportedException();
         }
         /// <summary>
         /// Deletes the <see cref="Node"/> instance and all of its contents. This operation removes the appropriate <see cref="Node"/>s from the database.
         /// </summary>
-        [Obsolete("The DeletePhysical is obsolete. Use ForceDelete to delete Node permanently.")]
+        [Obsolete("The DeletePhysical is obsolete. Use ForceDelete to delete Node permanently.", true)]
         public virtual void DeletePhysical()
         {
-            Delete();
+            throw new NotSupportedException();
         }
 
         /// <summary>
         /// Deletes the <see cref="Node"/> specified by the given path and its whole subtree physically.
         /// </summary>
+        [Obsolete("Use async version instead", true)]
         public static void ForceDelete(string sourcePath)
         {
-            var sourceNode = Node.LoadNode(sourcePath);
+            ForceDeleteAsync(sourcePath, CancellationToken.None).ConfigureAwait(false).GetAwaiter().GetResult();
+        }
+        /// <summary>
+        /// Asynchronously deletes the <see cref="Node"/> specified by the given path and its whole subtree physically.
+        /// </summary>
+        public static async Task ForceDeleteAsync(string sourcePath, CancellationToken cancel)
+        {
+            var sourceNode = await Node.LoadNodeAsync(sourcePath, cancel);
             if (sourceNode == null)
                 throw new InvalidOperationException(SR.GetString(SR.Exceptions.Operations.DeleteFailed_ContentDoesNotExistWithPath_1, sourcePath));
-            sourceNode.ForceDelete();
+            await sourceNode.ForceDeleteAsync(cancel);
         }
 
         /// <summary>
         /// Deletes the <see cref="Node"/> specified by the given id and its whole subtree physically.
         /// </summary>
+        [Obsolete("Use async version instead", true)]
         public static void ForceDelete(int nodeId)
         {
-            var sourceNode = Node.LoadNode(nodeId);
+            ForceDeleteAsync(nodeId, CancellationToken.None).ConfigureAwait(false).GetAwaiter().GetResult();
+        }
+        /// <summary>
+        /// Asynchronously deletes the <see cref="Node"/> specified by the given id and its whole subtree physically.
+        /// </summary>
+        public static async Task ForceDeleteAsync(int nodeId, CancellationToken cancel)
+        {
+            var sourceNode = await Node.LoadNodeAsync(nodeId, cancel);
             if (sourceNode == null)
                 throw new InvalidOperationException(SR.GetString(SR.Exceptions.Operations.DeleteFailed_ContentDoesNotExistWithId_1, nodeId));
-            sourceNode.ForceDelete();
+            await sourceNode.ForceDeleteAsync(cancel);
         }
 
         /// <summary>
-        /// This method deletes the <see cref="Node"/> permanently.
+        /// Deletes the <see cref="Node"/> permanently.
         /// </summary>
+        [Obsolete("Use async version instead", true)]
         public virtual void ForceDelete()
         {
-            using (var op = SnTrace.ContentOperation.StartOperation("Node.ForceDelete: Id:{0}, Path:{1}", Id, Path))
+            ForceDeleteAsync(CancellationToken.None).ConfigureAwait(false).GetAwaiter().GetResult();
+        }
+        /// <summary>
+        /// Asynchronously deletes the <see cref="Node"/> permanently.
+        /// </summary>
+        public virtual async Task ForceDeleteAsync(CancellationToken cancel)
+        {
+            using (var op = SnTrace.ContentOperation.StartOperation("Node.ForceDeleteAsync: Id:{0}, Path:{1}", Id, Path))
             {
                 this.Security.AssertSubtree(PermissionType.Delete);
 
                 this.AssertLock();
+                AssertDeletion();
 
                 var myPath = Path;
                 using (var audit = new AuditBlock(AuditEvent.ContentDeleted, "Trying to delete the content.",
@@ -3551,9 +4300,11 @@ namespace SenseNet.ContentRepository.Storage
                         throw new CancelNodeEventException(args.CancelMessage, args.EventType, this);
                     var customData = args.GetCustomData();
 
-                    var contentListTypesInTree = (this is IContentList) ?
-                        new List<ContentListType>(new[] { this.ContentListType }) :
-                        DataProvider.Current.GetContentListTypesInTree(this.Path);
+                    _indexDocument = GetIndexDocument();
+
+                    var contentListTypesInTree = (this is IContentList)
+                        ? new List<ContentListType>(new[] {this.ContentListType})
+                        : await DataStore.GetContentListTypesInTreeAsync(this.Path, CancellationToken.None);
 
                     var logProps = CollectAllProperties(this.Data);
                     var oldPath = this.Path;
@@ -3566,9 +4317,12 @@ namespace SenseNet.ContentRepository.Storage
                         try
                         {
                             // prevent concurrency problems
-                            using (var treeLock = TreeLock.Acquire(this.Path))
+                            using (await Providers.Instance.TreeLock.AcquireAsync(CancellationToken.None, this.Path))
+                            {
                                 // main work
-                                DataProvider.Current.DeleteNodePsychical(this.Id, this.NodeTimestamp);
+                                await DataStore.DeleteNodeAsync(Data, CancellationToken.None);
+                            }
+
                             // successful
                             break;
                         }
@@ -3578,7 +4332,7 @@ namespace SenseNet.ContentRepository.Storage
                             if (deletingAttempt++ > 3)
                                 // exit if there were too many attempts
                                 throw;
-                            System.Threading.Thread.Sleep(10);
+                            await Task.Delay(10);
                             // getting a newer version.
                             Reload();
                         }
@@ -3586,8 +4340,7 @@ namespace SenseNet.ContentRepository.Storage
                         {
                             if (e.Message.Contains("DELETE statement conflicted with the REFERENCE constraint"))
                             {
-                                int totalCountOfReferrers;
-                                var referrers = GetReferrers(5, out totalCountOfReferrers);
+                                var referrers = GetReferrers(5, out var totalCountOfReferrers);
                                 throw new CannotDeleteReferredContentException(referrers, totalCountOfReferrers);
                             }
                             throw new ApplicationException("You cannot delete this content", e);
@@ -3600,9 +4353,10 @@ namespace SenseNet.ContentRepository.Storage
                     var hadContentList = RemoveContentListTypesInTree(contentListTypesInTree) > 0;
 
                     if (this.Id > 0)
-                        SecurityHandler.DeleteEntity(this.Id);
+                        await Providers.Instance.SecurityHandler.DeleteEntityAsync(this.Id, cancel).ConfigureAwait(false);
 
-                    SearchManager.GetIndexPopulator().DeleteTree(myPath, this.Id);
+                    await Providers.Instance.SearchManager.GetIndexPopulator()
+                        .DeleteTreeAsync(myPath, this.Id, CancellationToken.None);
 
                     if (hadContentList)
                         FireAnyContentListDeleted();
@@ -3617,10 +4371,11 @@ namespace SenseNet.ContentRepository.Storage
                 op.Successful = true;
             }
         }
+
         /// <summary>
         /// This method deletes the <see cref="Node"/> permanently.
         /// </summary>
-        [Obsolete("Use parameterless ForceDelete method.")]
+        [Obsolete("Use parameterless ForceDelete method.", true)]
         public virtual void ForceDelete(long timestamp)
         {
             ForceDelete();
@@ -3666,30 +4421,46 @@ namespace SenseNet.ContentRepository.Storage
         /// <summary>
         /// Deletes the node.
         /// </summary>
+        [Obsolete("Use async version instead", true)]
         public static void Delete(string sourcePath)
         {
-            var sourceNode = Node.LoadNode(sourcePath);
+            DeleteAsync(sourcePath, CancellationToken.None).ConfigureAwait(false).GetAwaiter().GetResult();
+        }
+        /// <summary>
+        /// Asynchronously deletes the node.
+        /// </summary>
+        public static async Task DeleteAsync(string sourcePath, CancellationToken cancel)
+        {
+            var sourceNode = await Node.LoadNodeAsync(sourcePath, cancel);
             if (sourceNode == null)
                 throw new InvalidOperationException(SR.GetString(SR.Exceptions.Operations.DeleteFailed_ContentDoesNotExistWithPath_1, sourcePath));
-            sourceNode.Delete();
+            await sourceNode.DeleteAsync(cancel);
         }
 
         /// <summary>
         /// Deletes the node.
         /// </summary>
+        [Obsolete("Use async version instead", true)]
         public static void Delete(int nodeId)
         {
-            var sourceNode = Node.LoadNode(nodeId);
+            DeleteAsync(nodeId, CancellationToken.None).ConfigureAwait(false).GetAwaiter().GetResult();
+        }
+        /// <summary>
+        /// Asynchronously deletes the node.
+        /// </summary>
+        public static async Task DeleteAsync(int nodeId, CancellationToken cancel)
+        {
+            var sourceNode = await Node.LoadNodeAsync(nodeId, cancel);
             if (sourceNode == null)
                 throw new InvalidOperationException(SR.GetString(SR.Exceptions.Operations.DeleteFailed_ContentDoesNotExistWithId_1, nodeId));
-            sourceNode.Delete();
+            await sourceNode.DeleteAsync(cancel);
         }
 
         /// <summary>
         /// Batch delete.
         /// </summary>
         /// <param name="nodeList">Represents an Id collection which holds the identifiers of the <see cref="Node"/>s will be deleted.</param>
-        /// <param name="errors">If any error occures, it is added to the errors collection passed by errors parameter.</param>
+        /// <param name="errors">If any error occurres, it is added to the errors collection passed by errors parameter.</param>
         /// <exception cref="ArgumentNullException">You must specify a list collection instance.</exception>
         public static void Delete(List<int> nodeList, ref List<Exception> errors)
         {
@@ -3718,6 +4489,7 @@ namespace SenseNet.ContentRepository.Storage
                 {
                     node.Security.AssertSubtree(PermissionType.Delete);
                     node.AssertLock();
+                    node.AssertDeletion();
                 }
                 catch (Exception e)
                 {
@@ -3741,8 +4513,8 @@ namespace SenseNet.ContentRepository.Storage
 
                 try
                 {
-                    using (var treeLock = TreeLock.Acquire(nodeRef.Path))
-                        DataProvider.Current.DeleteNodePsychical(nodeRef.Id, nodeRef.NodeTimestamp);
+                    using (Providers.Instance.TreeLock.AcquireAsync(CancellationToken.None, nodeRef.Path).GetAwaiter().GetResult())
+                        Providers.Instance.DataStore.DeleteNodeAsync(nodeRef.Data, CancellationToken.None).GetAwaiter().GetResult();
                 }
                 catch (Exception e) // rethrow
                 {
@@ -3772,7 +4544,7 @@ namespace SenseNet.ContentRepository.Storage
                 }
 
                 if (nodeRef.Id > 0)
-                    SecurityHandler.DeleteEntity(nodeRef.Id);
+                    Providers.Instance.SecurityHandler.DeleteEntityAsync(nodeRef.Id, CancellationToken.None).GetAwaiter().GetResult();
             }
 
             var ids = new List<Int32>();
@@ -3783,7 +4555,7 @@ namespace SenseNet.ContentRepository.Storage
             }
             try
             {
-                SearchManager.GetIndexPopulator().DeleteForest(ids);
+                Providers.Instance.SearchManager.GetIndexPopulator().DeleteForestAsync(ids, CancellationToken.None).GetAwaiter().GetResult();
             }
             catch (Exception e)
             {
@@ -3802,9 +4574,17 @@ namespace SenseNet.ContentRepository.Storage
         /// <summary>
         /// Deletes the current node.
         /// </summary>
+        [Obsolete("Use async version instead", true)]
         public virtual void Delete()
         {
-            ForceDelete();
+            DeleteAsync(CancellationToken.None).ConfigureAwait(false).GetAwaiter().GetResult();
+        }
+        /// <summary>
+        /// Asynchronously deletes the current node.
+        /// </summary>
+        public virtual Task DeleteAsync(CancellationToken cancel)
+        {
+            return ForceDeleteAsync(cancel);
         }
 
         #endregion
@@ -3819,6 +4599,8 @@ namespace SenseNet.ContentRepository.Storage
         }
 
         #region // ================================================================================================= Events
+
+        private IEventDistributor EventDistributor => Providers.Instance.EventDistributor;
 
         private List<Type> _disabledObservers;
         /// <summary>
@@ -3866,6 +4648,14 @@ namespace SenseNet.ContentRepository.Storage
         /// </summary>
         public event EventHandler<NodeEventArgs> Deleted;
         /// <summary>
+        /// Occurs before this <see cref="Node"/> instance is restored from the temporarily deleted state.
+        /// </summary>
+        public event CancellableNodeEventHandler Restoring;
+        /// <summary>
+        /// Occurs after this <see cref="Node"/> instance is restored from the temporarily deleted state.
+        /// </summary>
+        public event EventHandler<NodeEventArgs> Restored;
+        /// <summary>
         /// Occurs before this <see cref="Node"/> instance is deleted physically.
         /// </summary>
         public event CancellableNodeEventHandler DeletingPhysically;
@@ -3890,14 +4680,14 @@ namespace SenseNet.ContentRepository.Storage
         /// </summary>
         public event EventHandler<NodeOperationEventArgs> Copied;
         /// <summary>
-        /// Occurs before this <see cref="Node"/> instance's permision setting is changed.
+        /// Occurs before this <see cref="Node"/> instance's permission setting is changed.
         /// </summary>
 #pragma warning disable 67
         [Obsolete("Do not use this event anymore.")]
         public event CancellableNodeEventHandler PermissionChanging;
 #pragma warning restore 67
         /// <summary>
-        /// Occurs after this <see cref="Node"/> instance's permision setting is changed.
+        /// Occurs after this <see cref="Node"/> instance's permission setting is changed.
         /// </summary>
 #pragma warning disable 67
         [Obsolete("Do not use this event anymore.")]
@@ -3915,12 +4705,22 @@ namespace SenseNet.ContentRepository.Storage
             if (e.Cancel)
                 return;
             NodeObserver.FireOnNodeCreating(Creating, this, e, _disabledObservers);
+
+            var canceled = EventDistributor.FireCancellableNodeObserverEventAsync(
+                    new NodeCreatingEvent(e), _disabledObservers)
+                .ConfigureAwait(false).GetAwaiter().GetResult();
+            if (canceled)
+                e.Cancel = true;
+
         }
         private void FireOnCreated(IDictionary<string, object> customData)
         {
             NodeEventArgs e = new NodeEventArgs(this, NodeEvent.Created, customData);
             OnCreated(this, e);
             NodeObserver.FireOnNodeCreated(Created, this, e, _disabledObservers);
+
+            EventDistributor.FireNodeObserverEventAsync(new NodeCreatedEvent(e), _disabledObservers)
+                .ConfigureAwait(false).GetAwaiter().GetResult();
         }
         private void FireOnModifying(CancellableNodeEventArgs e)
         {
@@ -3928,12 +4728,21 @@ namespace SenseNet.ContentRepository.Storage
             if (e.Cancel)
                 return;
             NodeObserver.FireOnNodeModifying(Modifying, this, e, _disabledObservers);
+
+            var canceled = EventDistributor.FireCancellableNodeObserverEventAsync(
+                    new NodeModifyingEvent(e), _disabledObservers)
+                .ConfigureAwait(false).GetAwaiter().GetResult();
+            if(canceled)
+                e.Cancel = true;
         }
         private void FireOnModified(string originalSourcePath, IDictionary<string, object> customData, IEnumerable<ChangedData> changedData)
         {
             NodeEventArgs e = new NodeEventArgs(this, NodeEvent.Modified, customData, originalSourcePath, changedData);
             OnModified(this, e);
             NodeObserver.FireOnNodeModified(Modified, this, e, _disabledObservers);
+
+            EventDistributor.FireNodeObserverEventAsync(new NodeModifiedEvent(e), _disabledObservers)
+                .ConfigureAwait(false).GetAwaiter().GetResult();
         }
         private void FireOnDeleting(CancellableNodeEventArgs e)
         {
@@ -3941,12 +4750,43 @@ namespace SenseNet.ContentRepository.Storage
             if (e.Cancel)
                 return;
             NodeObserver.FireOnNodeDeleting(Deleting, this, e, _disabledObservers);
+
+            var canceled = EventDistributor.FireCancellableNodeObserverEventAsync(
+                    new NodeDeletingEvent(e), _disabledObservers)
+                .ConfigureAwait(false).GetAwaiter().GetResult();
+            if (canceled)
+                e.Cancel = true;
         }
         private void FireOnDeleted(IDictionary<string, object> customData)
         {
             NodeEventArgs e = new NodeEventArgs(this, NodeEvent.Deleted, customData);
             OnDeleted(this, e);
             NodeObserver.FireOnNodeDeleted(Deleted, this, e, _disabledObservers);
+
+            EventDistributor.FireNodeObserverEventAsync(new NodeDeletedEvent(e), _disabledObservers)
+                .ConfigureAwait(false).GetAwaiter().GetResult();
+        }
+        private void FireOnRestoring(CancellableNodeEventArgs e)
+        {
+            OnRestoring(this, e);
+            if (e.Cancel)
+                return;
+            NodeObserver.FireOnNodeRestoring(Restoring, this, e, _disabledObservers);
+
+            var canceled = EventDistributor.FireCancellableNodeObserverEventAsync(
+                    new NodeRestoringEvent(e), _disabledObservers)
+                .ConfigureAwait(false).GetAwaiter().GetResult();
+            if (canceled)
+                e.Cancel = true;
+        }
+        private void FireOnRestored(IDictionary<string, object> customData)
+        {
+            NodeEventArgs e = new NodeEventArgs(this, NodeEvent.Restored, customData);
+            OnRestored(this, e);
+            NodeObserver.FireOnNodeRestored(Restored, this, e, _disabledObservers);
+
+            EventDistributor.FireNodeObserverEventAsync(new NodeRestoredEvent(e), _disabledObservers)
+                .ConfigureAwait(false).GetAwaiter().GetResult();
         }
         private void FireOnDeletingPhysically(CancellableNodeEventArgs e)
         {
@@ -3954,12 +4794,21 @@ namespace SenseNet.ContentRepository.Storage
             if (e.Cancel)
                 return;
             NodeObserver.FireOnNodeDeletingPhysically(DeletingPhysically, this, e, _disabledObservers);
+
+            var canceled = EventDistributor.FireCancellableNodeObserverEventAsync(
+                    new NodeForcedDeletingEvent(e), _disabledObservers)
+                .ConfigureAwait(false).GetAwaiter().GetResult();
+            if (canceled)
+                e.Cancel = true;
         }
         private void FireOnDeletedPhysically(IDictionary<string, object> customData)
         {
             NodeEventArgs e = new NodeEventArgs(this, NodeEvent.DeletedPhysically, customData);
             OnDeletedPhysically(this, e);
             NodeObserver.FireOnNodeDeletedPhysically(DeletedPhysically, this, e, _disabledObservers);
+
+            EventDistributor.FireNodeObserverEventAsync(new NodeForcedDeletedEvent(e), _disabledObservers)
+                .ConfigureAwait(false).GetAwaiter().GetResult();
         }
         private void FireOnMoving(CancellableNodeOperationEventArgs e)
         {
@@ -3967,12 +4816,21 @@ namespace SenseNet.ContentRepository.Storage
             if (e.Cancel)
                 return;
             NodeObserver.FireOnNodeMoving(Moving, this, e, _disabledObservers);
+
+            var canceled = EventDistributor.FireCancellableNodeObserverEventAsync(
+                    new NodeMovingEvent(e), _disabledObservers)
+                .ConfigureAwait(false).GetAwaiter().GetResult();
+            if (canceled)
+                e.Cancel = true;
         }
         private void FireOnMoved(Node targetNode, IDictionary<string, object> customData, string originalSourcePath)
         {
             NodeOperationEventArgs e = new NodeOperationEventArgs(this, targetNode, NodeEvent.Moved, customData, originalSourcePath);
             OnMoved(this, e);
             NodeObserver.FireOnNodeMoved(Moved, this, e, _disabledObservers);
+
+            EventDistributor.FireNodeObserverEventAsync(new NodeMovedEvent(e), _disabledObservers)
+                .ConfigureAwait(false).GetAwaiter().GetResult();
         }
         private void FireOnCopying(CancellableNodeOperationEventArgs e)
         {
@@ -3980,12 +4838,21 @@ namespace SenseNet.ContentRepository.Storage
             if (e.Cancel)
                 return;
             NodeObserver.FireOnNodeCopying(Copying, this, e, _disabledObservers);
+
+            var canceled = EventDistributor.FireCancellableNodeObserverEventAsync(
+                    new NodeCopyingEvent(e), _disabledObservers)
+                .ConfigureAwait(false).GetAwaiter().GetResult();
+            if (canceled)
+                e.Cancel = true;
         }
         private void FireOnCopied(Node targetNode, IDictionary<string, object> customData)
         {
             NodeOperationEventArgs e = new NodeOperationEventArgs(this, targetNode, NodeEvent.Copied, customData);
             OnCopied(this, e);
             NodeObserver.FireOnNodeCopied(Copied, this, e, _disabledObservers);
+
+            EventDistributor.FireNodeObserverEventAsync(new NodeCopiedEvent(e), _disabledObservers)
+                .ConfigureAwait(false).GetAwaiter().GetResult();
         }
         private void FireOnLoaded()
         {
@@ -4017,6 +4884,16 @@ namespace SenseNet.ContentRepository.Storage
         /// Raises the <see cref="Deleted"/> event.
         /// </summary>
         protected virtual void OnDeleted(object sender, NodeEventArgs e) { }
+
+        /// <summary>
+        /// Raises the <see cref="Restoring"/> event.
+        /// </summary>
+        protected virtual void OnRestoring(object sender, CancellableNodeEventArgs e) { }
+        /// <summary>
+        /// Raises the <see cref="Restored"/> event.
+        /// </summary>
+        protected virtual void OnRestored(object sender, NodeEventArgs e) { }
+
         /// <summary>
         /// Raises the <see cref="DeletingPhysically"/> event.
         /// </summary>
@@ -4069,6 +4946,41 @@ namespace SenseNet.ContentRepository.Storage
                 AnyContentListDeleted(this, EventArgs.Empty);
         }
 
+        private void AssertSaving(IEnumerable<ChangedData> changedData)
+        {
+            var validators = NodeOperationValidators;
+            if (validators == null)
+                return;
+            var data = changedData?.ToArray();
+            foreach (var validator in validators)
+                if (!validator.CheckSaving(this, data, out var errorMessage))
+                    throw new InvalidOperationException(errorMessage);
+        }
+        private void AssertMoving(Node target)
+        {
+            Providers.Instance.ContentProtector.AssertIsDeletable(this.Path);
+
+            var validators = NodeOperationValidators;
+            if (validators == null)
+                return;
+
+            foreach (var validator in validators)
+                if (!validator.CheckMoving(this, target, out var errorMessage))
+                    throw new InvalidOperationException(errorMessage);
+        }
+        private void AssertDeletion()
+        {
+            Providers.Instance.ContentProtector.AssertIsDeletable(this.Path);
+
+            var validators = NodeOperationValidators;
+            if (validators == null)
+                return;
+
+            foreach (var validator in validators)
+                if (!validator.CheckDeletion(this, out var errorMessage))
+                    throw new InvalidOperationException(errorMessage);
+        }
+
 
         #region // ================================================================================================= Public Tools
 
@@ -4095,7 +5007,7 @@ namespace SenseNet.ContentRepository.Storage
         /// </summary>
         public static bool Exists(string path)
         {
-            return DataBackingStore.NodeExists(path);
+            return Providers.Instance.DataStore.NodeExistsAsync(path, CancellationToken.None).GetAwaiter().GetResult();
         }
 
         /// <summary>
@@ -4124,7 +5036,7 @@ namespace SenseNet.ContentRepository.Storage
                 var head = NodeHead.Get(node.ParentPath);
                 if (head == null)
                     return null;
-                if (!SecurityHandler.HasPermission(head, PermissionType.See))
+                if (!Providers.Instance.SecurityHandler.HasPermission(head, PermissionType.See))
                     return null;
                 node = node.Parent;
             }
@@ -4147,7 +5059,7 @@ namespace SenseNet.ContentRepository.Storage
                 var head = NodeHead.Get(node.ParentPath);
                 if (head == null)
                     return null;
-                if (!SecurityHandler.HasPermission(head, PermissionType.See))
+                if (!Providers.Instance.SecurityHandler.HasPermission(head, PermissionType.See))
                     return null;
                 node = node.Parent;
             }
@@ -4201,7 +5113,7 @@ namespace SenseNet.ContentRepository.Storage
         }
 
         /// <summary>
-        /// Returns the level of hierachy the <see cref="Node"/> is located at. The virtual Root <see cref="Node"/> has a level of 0.
+        /// Returns the level of hierarchy the <see cref="Node"/> is located at. The virtual Root <see cref="Node"/> has a level of 0.
         /// </summary>
         /// <param name="node"></param>
         public int NodeLevel()
@@ -4228,21 +5140,16 @@ namespace SenseNet.ContentRepository.Storage
         /// <summary>
         /// Returns size of all blobs of all <see cref="Node"/> in the subtree that is identified by the given path.
         /// </summary>
-        public static long GetTreeSize(string path)
+        public static long GetTreeSize(string path, bool includeChildren = true)
         {
-            return GetTreeSize(path, true);
-        }
-
-        private static long GetTreeSize(string path, bool includeChildren)
-        {
-            return DataProvider.Current.GetTreeSize(path, includeChildren);
+            return Providers.Instance.DataStore.GetTreeSizeAsync(path, includeChildren, CancellationToken.None).GetAwaiter().GetResult();
         }
 
         #endregion
 
         #region // ================================================================================================= Private Tools
 
-        private void AssertSeeOnly(PropertyType propertyType)
+        protected void AssertSeeOnly(PropertyType propertyType)
         {
             if (IsPreviewOnly && propertyType.DataType == DataType.Binary)
             {
@@ -4250,7 +5157,11 @@ namespace SenseNet.ContentRepository.Storage
             }
             else if (IsHeadOnly && !SeeEnabledProperties.Contains(propertyType.Name)) // && AccessProvider.Current.GetCurrentUser().Id != -1)
             {
-                throw new InvalidOperationException(String.Concat("Invalid property access attempt on a See-only node. The accessible properties are: ", String.Join(", ", SeeEnabledProperties), "."));
+                SnTrace.Repository.WriteError($"Invalid property access attempt on a See-only node: {Path}. Property name: {propertyType.Name}.");
+
+                throw new InvalidOperationException(
+                    "Invalid property access attempt on a See-only node. " +
+                    $"The accessible properties are: {string.Join(", ", SeeEnabledProperties)}.");
             }
         }
         private void AssertLock()
@@ -4258,10 +5169,6 @@ namespace SenseNet.ContentRepository.Storage
             var userId = AccessProvider.Current.GetCurrentUser().Id;
             if (userId != -1 && (Lock.LockedBy != null && Lock.LockedBy.Id != userId) && Lock.Locked)
                 throw new LockedNodeException(Lock);
-
-            //UNDONE: uncomment when SharedLock storage is implemented
-            //if (null != SharedLock.GetLock(this.Id))
-            //    throw new LockedNodeException(Lock, "There is a shared lock on this Node.");
         }
         private static bool NameExists(IEnumerable<Node> nodeList, string name)
         {
@@ -4284,7 +5191,7 @@ namespace SenseNet.ContentRepository.Storage
             var head = NodeHead.Get(nodeId);
             if (head == null)
                 return null;
-            if (!SecurityHandler.HasPermission(head, PermissionType.See))
+            if (!Providers.Instance.SecurityHandler.HasPermission(head, PermissionType.See))
                 return LoadSomebody();
 
             try
@@ -4372,6 +5279,25 @@ namespace SenseNet.ContentRepository.Storage
         public bool TypeIs(string contentTypeName)
         {
             return NodeType.IsInstaceOfOrDerivedFrom(contentTypeName);
+        }
+
+        /*================================================================================================= Indexing */
+
+        private IndexDocument _indexDocument;
+        public IndexDocument GetIndexDocument()
+        {
+            // For now only in this case supports caching because of discovering invalidating issues are not finished.
+            // That is a future task.
+            if (_indexDocument != null && IsDeleted)
+                return _indexDocument;
+
+            //TODO:<?predication: Somehow store the index document after saving and get the stored object here, instead of recreating it.
+            // Problem: the index doc finalization doing in an async indexing task and it maybe not ready yet.
+            var docProvider = Providers.Instance.IndexDocumentProvider;
+            var doc = docProvider.GetIndexDocument(this, false, this.IsNew, out var _);
+            var docData = DataStore.CreateIndexDocumentData(this, doc, null);
+            Providers.Instance.IndexManager.CompleteIndexDocument(docData);
+            return doc;
         }
     }
     public class BenchmarkCounter

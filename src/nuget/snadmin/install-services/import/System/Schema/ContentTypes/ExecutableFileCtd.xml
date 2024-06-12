@@ -2,6 +2,8 @@
 <ContentType name="ExecutableFile" parentType="File" handler="SenseNet.ContentRepository.File" xmlns="http://schemas.sensenet.com/SenseNet/ContentRepository/ContentTypeDefinition">
   <DisplayName>$Ctd-ExecutableFile,DisplayName</DisplayName>
   <Description>$Ctd-ExecutableFile,Description</Description>
-  <Icon>Application</Icon>
+  <Icon>ExecutableFile</Icon>
   <Preview>false</Preview>
+  <Categories>HideByDefault</Categories>
+  <SystemType>true</SystemType>
 </ContentType>

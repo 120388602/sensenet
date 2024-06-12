@@ -3,20 +3,17 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
-using System.Threading.Tasks;
+using System.Threading;
 using System.Xml;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
-using SenseNet.Configuration;
 using SenseNet.ContentRepository;
-using SenseNet.ContentRepository.Search;
 using SenseNet.ContentRepository.Search.Indexing;
 using SenseNet.ContentRepository.Versioning;
 using SenseNet.ContentRepository.Workspaces;
-using SenseNet.Diagnostics;
 using SenseNet.Packaging.Steps;
 using SenseNet.Packaging.Tests.Implementations;
-using SenseNet.Tests;
-using SenseNet.Tests.Implementations;
+using SenseNet.Testing;
+using SenseNet.Tests.Core;
 
 namespace SenseNet.Packaging.Tests.StepTests
 {
@@ -30,7 +27,7 @@ namespace SenseNet.Packaging.Tests.StepTests
             // preparing logger
             _log = new StringBuilder();
             var loggers = new[] { new PackagingTestLogger(_log) };
-            var loggerAcc = new PrivateType(typeof(Logger));
+            var loggerAcc = new TypeAccessor(typeof(Logger));
             loggerAcc.SetStaticField("_loggers", loggers);
         }
         [TestCleanup]
@@ -38,15 +35,15 @@ namespace SenseNet.Packaging.Tests.StepTests
         {
         }
 
-        [TestMethod]
-        public void Packaging_PopulateIndex_HardReindexWorksOnAllVersions()
+        [TestMethod, TestCategory("Services")]
+        public void Packaging_PopulateIndex_HardReindexWorksOnAllVersions_CSrv()
         {
             Test(() =>
             {
                 // arrange
                 InstallCarContentType();
                 var root = new SystemFolder(Repository.Root) {Name = "TestRoot"};
-                root.Save();
+                root.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                 var workspace = new Workspace(root)
                 {
@@ -54,23 +51,23 @@ namespace SenseNet.Packaging.Tests.StepTests
                     InheritableVersioningMode = InheritableVersioningType.MajorAndMinor
                 };
                 workspace.AllowChildType("Car");
-                workspace.Save();
+                workspace.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                 var car1 = Content.CreateNew("Car", workspace, "Car1");
-                car1.Save();
+                car1.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                 var id = car1.Id;
 
                 // create some versions
-                car1 = Content.Load(id); car1.Publish();
-                car1 = Content.Load(id); car1.CheckOut();
-                car1 = Content.Load(id); car1.Index++; car1.Save();
-                car1.CheckIn();
-                car1 = Content.Load(id); car1.Index++; car1.Save();
-                car1 = Content.Load(id); car1.Index++; car1.Save();
-                car1 = Content.Load(id); car1.Publish();
-                car1 = Content.Load(id); car1.Index++; car1.Save();
-                car1 = Content.Load(id); car1.Index++; car1.Save();
-                car1 = Content.Load(id); car1.Publish();
+                car1 = Content.Load(id); car1.PublishAsync(CancellationToken.None).GetAwaiter().GetResult();
+                car1 = Content.Load(id); car1.CheckOutAsync(CancellationToken.None).GetAwaiter().GetResult();
+                car1 = Content.Load(id); car1.Index++; car1.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
+                car1.CheckInAsync(CancellationToken.None).GetAwaiter().GetResult();
+                car1 = Content.Load(id); car1.Index++; car1.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
+                car1 = Content.Load(id); car1.Index++; car1.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
+                car1 = Content.Load(id); car1.PublishAsync(CancellationToken.None).GetAwaiter().GetResult();
+                car1 = Content.Load(id); car1.Index++; car1.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
+                car1 = Content.Load(id); car1.Index++; car1.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
+                car1 = Content.Load(id); car1.PublishAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                 var versions = car1.Versions.Select(n => n.Version.ToString()).ToArray();
 

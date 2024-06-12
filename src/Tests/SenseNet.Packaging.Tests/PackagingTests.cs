@@ -4,12 +4,14 @@ using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Xml;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using SenseNet.ContentRepository;
 using SenseNet.ContentRepository.Storage;
 using SenseNet.ContentRepository.Storage.Data;
 using SenseNet.Packaging.Steps;
+using Tasks = System.Threading.Tasks;
 
 namespace SenseNet.Packaging.Tests
 {
@@ -609,9 +611,7 @@ namespace SenseNet.Packaging.Tests
 
             var component = RepositoryVersionInfo.Instance.Components.FirstOrDefault();
             Assert.IsNotNull(component);
-            Assert.IsNotNull(component.AcceptableVersion);
             Assert.AreEqual("4.42", component.Version.ToString());
-            Assert.AreEqual("4.42", component.AcceptableVersion.ToString());
             Assert.AreEqual("Component42", component.ComponentId);
         }
 
@@ -703,7 +703,7 @@ namespace SenseNet.Packaging.Tests
             ExecutePhases(manifest);
         }
         [TestMethod]
-        public void Packaging_DependencyCheck_CanInstall_SameVersion_AfterFailures()
+        public async Tasks.Task Packaging_DependencyCheck_CanInstall_SameVersion_AfterFailures()
         {
             const string packageId = "MyCompany.MyComponent";
             const string manifest = @"<?xml version='1.0' encoding='utf-8'?>
@@ -719,9 +719,9 @@ namespace SenseNet.Packaging.Tests
             ExecutePhases(manifest);
 
             // add a few failure lines
-            SavePackage(packageId, "1.1", "01:00", "2016-01-01", PackageType.Install, ExecutionResult.Faulty);
-            SavePackage(packageId, "1.1", "02:00", "2016-01-02", PackageType.Patch, ExecutionResult.Faulty);
-            SavePackage(packageId, "1.1", "03:00", "2016-01-03", PackageType.Patch, ExecutionResult.Unfinished);
+            await SavePackage(packageId, "1.1", "01:00", "2016-01-01", PackageType.Install, ExecutionResult.Faulty);
+            await SavePackage(packageId, "1.1", "02:00", "2016-01-02", PackageType.Patch, ExecutionResult.Faulty);
+            await SavePackage(packageId, "1.1", "03:00", "2016-01-03", PackageType.Patch, ExecutionResult.Unfinished);
 
             // execute the original package to 'repair' the component
             ExecutePhases(manifest);
@@ -1139,8 +1139,6 @@ namespace SenseNet.Packaging.Tests
             Assert.IsNotNull(component);
             Assert.AreEqual("Component42", component.ComponentId);
             Assert.AreEqual("4.42", component.Version.ToString());
-            Assert.IsNotNull(component.AcceptableVersion);
-            Assert.AreEqual("4.42", component.AcceptableVersion.ToString());
             var pkg = RepositoryVersionInfo.Instance.InstalledPackages.FirstOrDefault();
             Assert.IsNotNull(pkg);
             Assert.AreEqual("Component42", pkg.ComponentId);
@@ -1200,8 +1198,6 @@ namespace SenseNet.Packaging.Tests
             Assert.IsNotNull(component);
             Assert.AreEqual("Component42", component.ComponentId);
             Assert.AreEqual("4.42", component.Version.ToString());
-            Assert.IsNotNull(component.AcceptableVersion);
-            Assert.AreEqual("4.42", component.AcceptableVersion.ToString());
             pkg = RepositoryVersionInfo.Instance.InstalledPackages.FirstOrDefault();
             Assert.IsNotNull(pkg);
             Assert.AreEqual("Component42", pkg.ComponentId);
@@ -1246,9 +1242,7 @@ namespace SenseNet.Packaging.Tests
             var component = RepositoryVersionInfo.Instance.Components.FirstOrDefault();
             Assert.IsNotNull(component);
             Assert.AreEqual("MyCompany.MyComponent", component.ComponentId);
-            Assert.AreEqual("1.2", component.Version.ToString());
-            Assert.IsNotNull(component.AcceptableVersion);
-            Assert.AreEqual("1.0", component.AcceptableVersion.ToString());
+            Assert.AreEqual("1.0", component.Version.ToString());
             var pkg = RepositoryVersionInfo.Instance.InstalledPackages.LastOrDefault();
             Assert.IsNotNull(pkg);
             Assert.AreEqual("MyCompany.MyComponent", pkg.ComponentId);
@@ -1263,9 +1257,7 @@ namespace SenseNet.Packaging.Tests
             component = RepositoryVersionInfo.Instance.Components.FirstOrDefault();
             Assert.IsNotNull(component);
             Assert.AreEqual("MyCompany.MyComponent", component.ComponentId);
-            Assert.AreEqual("1.2", component.Version.ToString());
-            Assert.IsNotNull(component.AcceptableVersion);
-            Assert.AreEqual("1.0", component.AcceptableVersion.ToString());
+            Assert.AreEqual("1.0", component.Version.ToString());
             pkg = RepositoryVersionInfo.Instance.InstalledPackages.LastOrDefault();
             Assert.IsNotNull(pkg);
             Assert.AreEqual("MyCompany.MyComponent", pkg.ComponentId);
@@ -1281,8 +1273,6 @@ namespace SenseNet.Packaging.Tests
             Assert.IsNotNull(component);
             Assert.AreEqual("MyCompany.MyComponent", component.ComponentId);
             Assert.AreEqual("1.2", component.Version.ToString());
-            Assert.IsNotNull(component.AcceptableVersion);
-            Assert.AreEqual("1.2", component.AcceptableVersion.ToString());
             pkg = RepositoryVersionInfo.Instance.InstalledPackages.LastOrDefault();
             Assert.IsNotNull(pkg);
             Assert.AreEqual("MyCompany.MyComponent", pkg.ComponentId);
@@ -1333,9 +1323,7 @@ namespace SenseNet.Packaging.Tests
             var component = RepositoryVersionInfo.Instance.Components.FirstOrDefault();
             Assert.IsNotNull(component);
             Assert.AreEqual("MyCompany.MyComponent", component.ComponentId);
-            Assert.AreEqual("1.2", component.Version.ToString());
-            Assert.IsNotNull(component.AcceptableVersion);
-            Assert.AreEqual("1.0", component.AcceptableVersion.ToString());
+            Assert.AreEqual("1.0", component.Version.ToString());
             var pkg = RepositoryVersionInfo.Instance.InstalledPackages.LastOrDefault();
             Assert.IsNotNull(pkg);
             Assert.AreEqual("MyCompany.MyComponent", pkg.ComponentId);
@@ -1392,8 +1380,6 @@ namespace SenseNet.Packaging.Tests
             Assert.IsNotNull(component);
             Assert.AreEqual("MyCompany.MyComponent", component.ComponentId);
             Assert.AreEqual("1.2", component.Version.ToString());
-            Assert.IsNotNull(component.AcceptableVersion);
-            Assert.AreEqual("1.2", component.AcceptableVersion.ToString());
             var pkg = RepositoryVersionInfo.Instance.InstalledPackages.LastOrDefault();
             Assert.IsNotNull(pkg);
             Assert.AreEqual("MyCompany.MyComponent", pkg.ComponentId);
@@ -1453,8 +1439,6 @@ namespace SenseNet.Packaging.Tests
             Assert.IsNotNull(component);
             Assert.AreEqual("MyCompany.MyComponent", component.ComponentId);
             Assert.AreEqual("1.2", component.Version.ToString());
-            Assert.IsNotNull(component.AcceptableVersion);
-            Assert.AreEqual("1.2", component.AcceptableVersion.ToString());
             var pkg = RepositoryVersionInfo.Instance.InstalledPackages.LastOrDefault();
             Assert.IsNotNull(pkg);
             Assert.AreEqual("MyCompany.MyComponent", pkg.ComponentId);
@@ -1476,9 +1460,9 @@ namespace SenseNet.Packaging.Tests
             Assert.AreEqual(0, packages.Length);
         }
         [TestMethod]
-        public void Packaging_VersionInfo_OnlyUnfinished()
+        public async Tasks.Task Packaging_VersionInfo_OnlyUnfinished()
         {
-            SavePackage("C1", "1.0", "01:00", "2016-01-01", PackageType.Install, ExecutionResult.Unfinished);
+            await SavePackage("C1", "1.0", "01:00", "2016-01-01", PackageType.Install, ExecutionResult.Unfinished);
 
             // action
             var verInfo = RepositoryVersionInfo.Instance;
@@ -1490,9 +1474,9 @@ namespace SenseNet.Packaging.Tests
             Assert.AreEqual(1, packages.Length);
         }
         [TestMethod]
-        public void Packaging_VersionInfo_OnlyFaulty()
+        public async Tasks.Task Packaging_VersionInfo_OnlyFaulty()
         {
-            SavePackage("C1", "1.0", "01:00", "2016-01-01", PackageType.Install, ExecutionResult.Faulty);
+            await SavePackage("C1", "1.0", "01:00", "2016-01-01", PackageType.Install, ExecutionResult.Faulty);
 
             // action
             var verInfo = RepositoryVersionInfo.Instance;
@@ -1504,17 +1488,17 @@ namespace SenseNet.Packaging.Tests
             Assert.AreEqual(1, packages.Length);
         }
         [TestMethod]
-        public void Packaging_VersionInfo_Complex()
+        public async Tasks.Task Packaging_VersionInfo_Complex()
         {
-            SavePackage("C1", "1.0", "01:00", "2016-01-01", PackageType.Install, ExecutionResult.Successful);
-            SavePackage("C2", "1.0", "02:00", "2016-01-02", PackageType.Install, ExecutionResult.Successful);
-            SavePackage("C1", "1.1", "03:00", "2016-01-03", PackageType.Patch, ExecutionResult.Faulty);
-            SavePackage("C1", "1.1", "04:00", "2016-01-03", PackageType.Patch, ExecutionResult.Faulty);
-            SavePackage("C1", "1.2", "05:00", "2016-01-06", PackageType.Patch, ExecutionResult.Successful);
-            SavePackage("C2", "1.1", "06:00", "2016-01-07", PackageType.Patch, ExecutionResult.Unfinished);
-            SavePackage("C2", "1.2", "07:00", "2016-01-08", PackageType.Patch, ExecutionResult.Unfinished);
-            SavePackage("C3", "1.0", "08:00", "2016-01-09", PackageType.Install, ExecutionResult.Faulty);
-            SavePackage("C3", "2.0", "08:00", "2016-01-09", PackageType.Install, ExecutionResult.Faulty);
+            await SavePackage("C1", "1.0", "01:00", "2016-01-01", PackageType.Install, ExecutionResult.Successful);
+            await SavePackage("C2", "1.0", "02:00", "2016-01-02", PackageType.Install, ExecutionResult.Successful);
+            await SavePackage("C1", "1.1", "03:00", "2016-01-03", PackageType.Patch, ExecutionResult.Faulty);
+            await SavePackage("C1", "1.1", "04:00", "2016-01-03", PackageType.Patch, ExecutionResult.Faulty);
+            await SavePackage("C1", "1.2", "05:00", "2016-01-06", PackageType.Patch, ExecutionResult.Successful);
+            await SavePackage("C2", "1.1", "06:00", "2016-01-07", PackageType.Patch, ExecutionResult.Unfinished);
+            await SavePackage("C2", "1.2", "07:00", "2016-01-08", PackageType.Patch, ExecutionResult.Unfinished);
+            await SavePackage("C3", "1.0", "08:00", "2016-01-09", PackageType.Install, ExecutionResult.Faulty);
+            await SavePackage("C3", "2.0", "08:00", "2016-01-09", PackageType.Install, ExecutionResult.Faulty);
 
             // action
             var verInfo = RepositoryVersionInfo.Instance;
@@ -1522,36 +1506,36 @@ namespace SenseNet.Packaging.Tests
             // check
             var actual = string.Join(" | ", verInfo.Components
                 .OrderBy(a => a.ComponentId)
-                .Select(a => $"{a.ComponentId}: {a.AcceptableVersion} ({a.Version})")
+                .Select(a => $"{a.ComponentId}: {a.Version}")
                 .ToArray());
             // 
-            var expected = "C1: 1.2 (1.2) | C2: 1.0 (1.2)";
+            var expected = "C1: 1.2 | C2: 1.0";
             Assert.AreEqual(expected, actual);
             Assert.AreEqual(9, verInfo.InstalledPackages.Count());
         }
         [TestMethod]
-        public void Packaging_VersionInfo_MultipleInstall()
+        public async Tasks.Task Packaging_VersionInfo_MultipleInstall()
         {
             const string packageId = "C1";
-            SavePackage(packageId, "1.0", "01:00", "2016-01-01", PackageType.Install, ExecutionResult.Successful);
-            SavePackage(packageId, "1.0", "02:00", "2016-01-02", PackageType.Install, ExecutionResult.Successful);
-            SavePackage(packageId, "1.1", "03:00", "2016-01-03", PackageType.Install, ExecutionResult.Faulty);
-            SavePackage(packageId, "1.2", "04:00", "2016-01-04", PackageType.Install, ExecutionResult.Faulty);
-            SavePackage("C2", "1.0", "05:00", "2016-01-05", PackageType.Install, ExecutionResult.Successful);
-            SavePackage(packageId, "1.0", "06:00", "2016-01-06", PackageType.Install, ExecutionResult.Successful);
+            await SavePackage(packageId, "1.0", "01:00", "2016-01-01", PackageType.Install, ExecutionResult.Successful);
+            await SavePackage(packageId, "1.0", "02:00", "2016-01-02", PackageType.Install, ExecutionResult.Successful);
+            await SavePackage(packageId, "1.1", "03:00", "2016-01-03", PackageType.Install, ExecutionResult.Faulty);
+            await SavePackage(packageId, "1.2", "04:00", "2016-01-04", PackageType.Install, ExecutionResult.Faulty);
+            await SavePackage("C2", "1.0", "05:00", "2016-01-05", PackageType.Install, ExecutionResult.Successful);
+            await SavePackage(packageId, "1.0", "06:00", "2016-01-06", PackageType.Install, ExecutionResult.Successful);
 
             var verInfo = RepositoryVersionInfo.Instance;
 
             // check
             var actual = string.Join(" | ", verInfo.Components
                 .OrderBy(a => a.ComponentId)
-                .Select(a => $"{a.ComponentId}: {a.AcceptableVersion} ({a.Version})")
+                .Select(a => $"{a.ComponentId}: {a.Version}")
                 .ToArray());
 
             // In the current test implementation (TestPackageStorageProvider) the installed components
             // are loaded into a distinct list, there is only one line for every component. This is
             // DIFFERENT from the real SQL provider that loads all lines.
-            var expected = "C1: 1.0 (1.2) | C2: 1.0 (1.0)";
+            var expected = "C1: 1.0 | C2: 1.0";
             Assert.AreEqual(expected, actual);
             Assert.AreEqual(6, verInfo.InstalledPackages.Count());
         }
@@ -1561,7 +1545,7 @@ namespace SenseNet.Packaging.Tests
         #region // ========================================= Storing manifest
 
         [TestMethod]
-        public void Packaging_Manifest_StoredButNotLoaded()
+        public async Tasks.Task Packaging_Manifest_StoredButNotLoaded()
         {
             var manifest = @"<?xml version='1.0' encoding='utf-8'?>
                         <Package type='Install'>
@@ -1583,7 +1567,8 @@ namespace SenseNet.Packaging.Tests
             var package = verInfo.InstalledPackages.FirstOrDefault();
             Assert.IsNull(package?.Manifest);
 
-            PackageManager.Storage.LoadManifest(package);
+            await PackageManager.Storage.LoadManifestAsync(package, CancellationToken.None);
+
             var actual = package?.Manifest;
 
             Assert.AreEqual(expected, actual);
@@ -1594,25 +1579,26 @@ namespace SenseNet.Packaging.Tests
         #region // ========================================= Package deletion
 
         [TestMethod]
-        public void Packaging_DeleteOne()
+        public async Tasks.Task Packaging_DeleteOne()
         {
-            SavePackage("C1", "1.0", "00:00", "2016-01-01", PackageType.Install, ExecutionResult.Unfinished);
-            SavePackage("C1", "1.0", "01:00", "2016-01-01", PackageType.Install, ExecutionResult.Faulty);
-            SavePackage("C1", "1.0", "02:00", "2016-01-01", PackageType.Install, ExecutionResult.Successful);
-            SavePackage("C1", "1.1", "03:00", "2016-01-03", PackageType.Patch, ExecutionResult.Faulty);
-            SavePackage("C1", "1.1", "04:00", "2016-01-03", PackageType.Patch, ExecutionResult.Faulty);
-            SavePackage("C1", "1.1", "05:00", "2016-01-06", PackageType.Patch, ExecutionResult.Successful);
-            SavePackage("C1", "1.2", "06:00", "2016-01-07", PackageType.Patch, ExecutionResult.Unfinished);
-            SavePackage("C1", "1.2", "07:00", "2016-01-08", PackageType.Patch, ExecutionResult.Unfinished);
-            SavePackage("C1", "1.2", "08:00", "2016-01-09", PackageType.Patch, ExecutionResult.Faulty);
-            SavePackage("C1", "1.2", "09:00", "2016-01-09", PackageType.Patch, ExecutionResult.Faulty);
-            SavePackage("C1", "1.2", "10:00", "2016-01-09", PackageType.Patch, ExecutionResult.Successful);
+            await SavePackage("C1", "1.0", "00:00", "2016-01-01", PackageType.Install, ExecutionResult.Unfinished);
+            await SavePackage("C1", "1.0", "01:00", "2016-01-01", PackageType.Install, ExecutionResult.Faulty);
+            await SavePackage("C1", "1.0", "02:00", "2016-01-01", PackageType.Install, ExecutionResult.Successful);
+            await SavePackage("C1", "1.1", "03:00", "2016-01-03", PackageType.Patch, ExecutionResult.Faulty);
+            await SavePackage("C1", "1.1", "04:00", "2016-01-03", PackageType.Patch, ExecutionResult.Faulty);
+            await SavePackage("C1", "1.1", "05:00", "2016-01-06", PackageType.Patch, ExecutionResult.Successful);
+            await SavePackage("C1", "1.2", "06:00", "2016-01-07", PackageType.Patch, ExecutionResult.Unfinished);
+            await SavePackage("C1", "1.2", "07:00", "2016-01-08", PackageType.Patch, ExecutionResult.Unfinished);
+            await SavePackage("C1", "1.2", "08:00", "2016-01-09", PackageType.Patch, ExecutionResult.Faulty);
+            await SavePackage("C1", "1.2", "09:00", "2016-01-09", PackageType.Patch, ExecutionResult.Faulty);
+            await SavePackage("C1", "1.2", "10:00", "2016-01-09", PackageType.Patch, ExecutionResult.Successful);
 
             // action: delete all faulty and unfinished
             var packs = RepositoryVersionInfo.Instance.InstalledPackages
                 .Where(p => p.ExecutionResult != ExecutionResult.Successful);
             foreach (var package in packs)
-                PackageManager.Storage.DeletePackage(package);
+                await PackageManager.Storage.DeletePackageAsync(package, CancellationToken.None);
+
             RepositoryVersionInfo.Reset();
 
             // check
@@ -1623,15 +1609,15 @@ namespace SenseNet.Packaging.Tests
             var expected = "I:1.0-2 | P:1.1-5 | P:1.2-10";
             Assert.AreEqual(expected, actual);
         }
-        [TestMethod]
-        public void Packaging_DeleteAll()
+        [TestMethod, TestCategory("Services")]
+        public async Tasks.Task Packaging_DeleteAll_CSrv()
         {
-            SavePackage("C1", "1.0", "02:00", "2016-01-01", PackageType.Install, ExecutionResult.Successful);
-            SavePackage("C1", "1.1", "05:00", "2016-01-06", PackageType.Patch, ExecutionResult.Successful);
-            SavePackage("C1", "1.2", "10:00", "2016-01-09", PackageType.Patch, ExecutionResult.Successful);
+            await SavePackage("C1", "1.0", "02:00", "2016-01-01", PackageType.Install, ExecutionResult.Successful);
+            await SavePackage("C1", "1.1", "05:00", "2016-01-06", PackageType.Patch, ExecutionResult.Successful);
+            await SavePackage("C1", "1.2", "10:00", "2016-01-09", PackageType.Patch, ExecutionResult.Successful);
 
             // action
-            PackageManager.Storage.DeleteAllPackages();
+            await PackageManager.Storage.DeleteAllPackagesAsync(CancellationToken.None);
 
             // check
             Assert.IsFalse(RepositoryVersionInfo.Instance.InstalledPackages.Any());
@@ -1639,84 +1625,77 @@ namespace SenseNet.Packaging.Tests
 
         #endregion
 
-        //#region // ========================================= SystemInstall Package connectionStrintg
+        #region // ========================================= SystemInstall Package connectionStrintg
 
         [TestMethod]
         public void Packaging_SysInstallCnStr_Default()
         {
             var originalCnStr = "";
             var expectedCnStr = "Data Source=.;Initial Catalog=sensenet;Integrated Security=True";
-            using (CnStr(originalCnStr))
-            {
-                var actualCnStr = Manifest.EditConnectionString(originalCnStr, CnInfo(), CnInfo());
-                Assert.AreEqual(expectedCnStr, actualCnStr);
-            }
+            // ACTION
+            var actualCnStr = Manifest.EditConnectionString(originalCnStr, CnInfo(), CnInfo());
+            // ASSERT
+            Assert.AreEqual(expectedCnStr, actualCnStr);
         }
         [TestMethod]
         public void Packaging_SysInstallCnStr_ExplicitDefault()
         {
             var originalCnStr = "";
             var expectedCnStr = "Data Source=.;Initial Catalog=sensenet;Integrated Security=True";
-            using (CnStr(originalCnStr))
-            {
-                var actualCnStr = Manifest.EditConnectionString(originalCnStr, CnInfo(".", "sensenet"), CnInfo());
-                Assert.AreEqual(expectedCnStr, actualCnStr);
-            }
+            // ACTION
+            var actualCnStr = Manifest.EditConnectionString(originalCnStr, CnInfo(".", "sensenet"), CnInfo());
+            // ASSERT
+            Assert.AreEqual(expectedCnStr, actualCnStr);
         }
         [TestMethod]
         public void Packaging_SysInstallCnStr_SwitchSrv()
         {
             var originalCnStr = "";
             var expectedCnStr = "Data Source=SQL1;Initial Catalog=sensenet;Integrated Security=True";
-            using (CnStr(originalCnStr))
-            {
-                var actualCnStr = Manifest.EditConnectionString(originalCnStr, CnInfo("SQL1"), CnInfo());
-                Assert.AreEqual(expectedCnStr, actualCnStr);
-            }
+            // ACTION
+            var actualCnStr = Manifest.EditConnectionString(originalCnStr, CnInfo("SQL1"), CnInfo());
+            // ASSERT
+            Assert.AreEqual(expectedCnStr, actualCnStr);
         }
         [TestMethod]
         public void Packaging_SysInstallCnStr_SwitchDb()
         {
             var originalCnStr = "";
             var expectedCnStr = "Data Source=.;Initial Catalog=DB1;Integrated Security=True";
-            using (CnStr(originalCnStr))
-            {
-                var actualCnStr = Manifest.EditConnectionString(originalCnStr, CnInfo(null, "DB1"), CnInfo());
-                Assert.AreEqual(expectedCnStr, actualCnStr);
-            }
+            // ACTION
+            var actualCnStr = Manifest.EditConnectionString(originalCnStr, CnInfo(null, "DB1"), CnInfo());
+            // ASSERT
+            Assert.AreEqual(expectedCnStr, actualCnStr);
         }
         [TestMethod]
         public void Packaging_SysInstallCnStr_Default_2()
         {
             var originalCnStr = "Data Source=SQL1;Initial Catalog=DB1;Integrated Security=True";
             var expectedCnStr = "Data Source=.;Initial Catalog=sensenet;Integrated Security=True";
-            using (CnStr(originalCnStr))
-            {
-                var actualCnStr = Manifest.EditConnectionString(originalCnStr, CnInfo(), CnInfo());
-                Assert.AreEqual(expectedCnStr, actualCnStr);
-            }
+            // ACTION
+            var actualCnStr = Manifest.EditConnectionString(originalCnStr, CnInfo(), CnInfo());
+            // ASSERT
+            Assert.AreEqual(expectedCnStr, actualCnStr);
         }
         [TestMethod]
         public void Packaging_SysInstallCnStr_SwitchSrv_2()
         {
             var originalCnStr = "Data Source=SQL1;Initial Catalog=DB1;Integrated Security=True";
             var expectedCnStr = "Data Source=SQL2;Initial Catalog=sensenet;Integrated Security=True";
-            using (CnStr(originalCnStr))
-            {
-                var actualCnStr = Manifest.EditConnectionString(originalCnStr, CnInfo("SQL2"), CnInfo());
-                Assert.AreEqual(expectedCnStr, actualCnStr);
-            }
+            // ACTION
+            var actualCnStr = Manifest.EditConnectionString(originalCnStr, CnInfo("SQL2"), CnInfo());
+            // ASSERT
+            Assert.AreEqual(expectedCnStr, actualCnStr);
         }
         [TestMethod]
         public void Packaging_SysInstallCnStr_SwitchDb_2()
         {
             var originalCnStr = "Data Source=SQL1;Initial Catalog=DB1;Integrated Security=True";
             var expectedCnStr = "Data Source=.;Initial Catalog=DB2;Integrated Security=True";
-            using (CnStr(originalCnStr))
-            {
-                var actualCnStr = Manifest.EditConnectionString(originalCnStr, CnInfo(null, "DB2"), CnInfo());
-                Assert.AreEqual(expectedCnStr, actualCnStr);
-            }
+            // ACTION
+            var actualCnStr = Manifest.EditConnectionString(originalCnStr, CnInfo(null, "DB2"), CnInfo());
+            // ASSERT
+            Assert.AreEqual(expectedCnStr, actualCnStr);
         }
 
         [TestMethod]
@@ -1724,55 +1703,50 @@ namespace SenseNet.Packaging.Tests
         {
             var originalCnStr = "";
             var expectedCnStr = "Data Source=.;Initial Catalog=sensenet;Integrated Security=True";
-            using (CnStr(originalCnStr))
-            {
-                var actualCnStr = Manifest.EditConnectionString(originalCnStr, CnInfo(null, null, "USR1"), CnInfo());
-                Assert.AreEqual(expectedCnStr, actualCnStr);
-            }
+            // ACTION
+            var actualCnStr = Manifest.EditConnectionString(originalCnStr, CnInfo(null, null, "USR1"), CnInfo());
+            // ASSERT
+            Assert.AreEqual(expectedCnStr, actualCnStr);
         }
         [TestMethod]
         public void Packaging_SysInstallCnStr_OnlyPassword()
         {
             var originalCnStr = "";
             var expectedCnStr = "Data Source=.;Initial Catalog=sensenet;Integrated Security=True";
-            using (CnStr(originalCnStr))
-            {
-                var actualCnStr = Manifest.EditConnectionString(originalCnStr, CnInfo(null, null, null, "PWD1"), CnInfo());
-                Assert.AreEqual(expectedCnStr, actualCnStr);
-            }
+            // ACTION
+            var actualCnStr = Manifest.EditConnectionString(originalCnStr, CnInfo(null, null, null, "PWD1"), CnInfo());
+            // ASSERT
+            Assert.AreEqual(expectedCnStr, actualCnStr);
         }
         [TestMethod]
         public void Packaging_SysInstallCnStr_IntegratedAuthToSqlAuth()
         {
             var originalCnStr = "Data Source=.;Initial Catalog=sensenet;Integrated Security=True";
             var expectedCnStr = "Data Source=.;Initial Catalog=sensenet;Integrated Security=False;User ID=USR1;Password=PWD1";
-            using (CnStr(originalCnStr))
-            {
-                var actualCnStr = Manifest.EditConnectionString(originalCnStr, CnInfo(null, null, "USR1", "PWD1"), CnInfo());
-                Assert.AreEqual(expectedCnStr, actualCnStr);
-            }
+            // ACTION
+            var actualCnStr = Manifest.EditConnectionString(originalCnStr, CnInfo(null, null, "USR1", "PWD1"), CnInfo());
+            // ASSERT
+            Assert.AreEqual(expectedCnStr, actualCnStr);
         }
         [TestMethod]
         public void Packaging_SysInstallCnStr_SqlAuthToIntegrated()
         {
             var originalCnStr = "Data Source=.;Initial Catalog=sensenet;Integrated Security=False;User ID=USR1;Password=PWD1";
             var expectedCnStr = "Data Source=.;Initial Catalog=sensenet;Integrated Security=True";
-            using (CnStr(originalCnStr))
-            {
-                var actualCnStr = Manifest.EditConnectionString(originalCnStr, CnInfo(), CnInfo());
-                Assert.AreEqual(expectedCnStr, actualCnStr);
-            }
+            // ACTION
+            var actualCnStr = Manifest.EditConnectionString(originalCnStr, CnInfo(), CnInfo());
+            // ASSERT
+            Assert.AreEqual(expectedCnStr, actualCnStr);
         }
         [TestMethod]
         public void Packaging_SysInstallCnStr_SqlAuthChange()
         {
             var originalCnStr = "Data Source=.;Initial Catalog=sensenet;Integrated Security=False;User ID=USR1;Password=PWD1";
             var expectedCnStr = "Data Source=.;Initial Catalog=sensenet;Integrated Security=False;User ID=USR2;Password=PWD2";
-            using (CnStr(originalCnStr))
-            {
-                var actualCnStr = Manifest.EditConnectionString(originalCnStr, CnInfo(null, null, "USR2", "PWD2"), CnInfo());
-                Assert.AreEqual(expectedCnStr, actualCnStr);
-            }
+            // ACTION
+            var actualCnStr = Manifest.EditConnectionString(originalCnStr, CnInfo(null, null, "USR2", "PWD2"), CnInfo());
+            // ASSERT
+            Assert.AreEqual(expectedCnStr, actualCnStr);
         }
 
         //============================================================
@@ -1788,39 +1762,7 @@ namespace SenseNet.Packaging.Tests
             };
         }
 
-        private IDisposable CnStr(string connectionString)
-        {
-            return new ConnectionStringSwindler(connectionString);
-        }
-        private class ConnectionStringSwindler : Swindler<string>
-        {
-            public ConnectionStringSwindler(string connectionString):base(connectionString) { }
-            protected override string Value
-            {
-                get => Configuration.ConnectionStrings.ConnectionString;
-                set => Configuration.ConnectionStrings.ConnectionString = value;
-            }
-        }
-        private abstract class Swindler<T> : IDisposable
-        {
-            protected abstract T Value { get; set; }
-
-            private readonly T _saved;
-
-            [SuppressMessage("ReSharper", "VirtualMemberCallInConstructor")]
-            // Message supressed because the overridden member cannot cause any class inconsistence.
-            protected Swindler(T value)
-            {
-                _saved = Value;
-                Value = value;
-            }
-            public void Dispose()
-            {
-                Value = _saved;
-            }
-        }
-
-        //#endregion
+        #endregion
 
     }
 }

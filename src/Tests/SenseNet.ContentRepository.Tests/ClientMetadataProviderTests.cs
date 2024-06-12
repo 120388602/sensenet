@@ -3,12 +3,13 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Newtonsoft.Json.Linq;
 using SenseNet.ContentRepository.Schema;
 using SenseNet.ContentRepository.Schema.Metadata;
-using SenseNet.Services.Metadata;
-using SenseNet.Tests;
+using SenseNet.OData.Metadata;
+using SenseNet.Tests.Core;
 
 namespace SenseNet.ContentRepository.Tests
 {
@@ -19,13 +20,16 @@ namespace SenseNet.ContentRepository.Tests
         [TestCategory("Metadata")]
         public void ClientMetadataProvider_ExistingType()
         {
-            Test(() =>
+            Test2(services =>
+            {
+                services.AddSingleton<IClientMetadataProvider, ClientMetadataProvider>();
+            }, () =>
             {
                 var fileClass = new Class(ContentType.GetByName("File"));
                 var fileTypeObject = ClientMetadataProvider.Instance.GetClientMetaClass(fileClass) as JObject;
 
                 Assert.IsNotNull(fileTypeObject);
-                Assert.AreEqual("File", fileTypeObject["ContentTypeName"].Value<string>());
+                Assert.AreEqual("File", fileTypeObject["ContentTypeName"]?.Value<string>());
                 Assert.IsNotNull(fileTypeObject["DisplayName"]);
                 Assert.IsNotNull(fileTypeObject["Description"]);
                 Assert.IsNotNull(fileTypeObject["Icon"]);
@@ -33,6 +37,7 @@ namespace SenseNet.ContentRepository.Tests
                 Assert.IsNotNull(fileTypeObject["AllowIndexing"]);
                 Assert.IsNotNull(fileTypeObject["AllowIncrementalNaming"]);
                 Assert.IsNotNull(fileTypeObject["AllowedChildTypes"]);
+                Assert.IsNotNull(fileTypeObject["Categories"]);
                 Assert.IsNotNull(fileTypeObject["FieldSettings"]);
             });
         }
@@ -44,7 +49,10 @@ namespace SenseNet.ContentRepository.Tests
             var contentTypeName = System.Reflection.MethodBase.GetCurrentMethod().Name;
             var fieldName1 = "Field123456";
 
-            Test(() =>
+            Test2(services =>
+            {
+                services.AddSingleton<IClientMetadataProvider, ClientMetadataProvider>();
+            }, () =>
             {
                 var myType = ContentType.GetByName(contentTypeName);
 
@@ -74,12 +82,47 @@ namespace SenseNet.ContentRepository.Tests
                 Assert.AreEqual("ShortTextFieldSetting", field["Type"].Value<string>());
             });
         }
+        [TestMethod]
+        [TestCategory("Metadata")]
+        public void ClientMetadataProvider_Categories()
+        {
+            var contentTypeName = System.Reflection.MethodBase.GetCurrentMethod().Name;
+
+            Test2(services =>
+            {
+                services.AddSingleton<IClientMetadataProvider, ClientMetadataProvider>();
+            }, () =>
+            {
+                ContentTypeInstaller.InstallContentType($@"<?xml version='1.0' encoding='utf-8'?>
+                <ContentType name='{contentTypeName}' parentType='GenericContent'
+                         handler='{typeof(GenericContent).FullName}' xmlns='http://schemas.sensenet.com/SenseNet/ContentRepository/ContentTypeDefinition'>
+                    <Categories>Cat1 Cat2</Categories>
+                    <Fields/>
+                </ContentType>
+                ");
+
+                var myType = ContentType.GetByName(contentTypeName);
+                AssertSequenceEqual(new[] {"Cat1", "Cat2"}, myType.Categories);
+
+                var myClass = new Class(myType);
+                var myTypeObject = ClientMetadataProvider.Instance.GetClientMetaClass(myClass) as JObject;
+
+                Assert.IsNotNull(myTypeObject);
+                Assert.AreEqual(contentTypeName, myTypeObject["ContentTypeName"].Value<string>());
+
+                var categories = myTypeObject["Categories"]?.Values<string>() ?? Array.Empty<string>();
+                AssertSequenceEqual(new[] { "Cat1", "Cat2" }, categories.ToArray());
+            });
+        }
 
         [TestMethod]
         [TestCategory("Metadata")]
         public void ClientMetadataProvider_GetSchema_AllTypes()
         {
-            Test(() =>
+            Test2(services =>
+            {
+                services.AddSingleton<IClientMetadataProvider, ClientMetadataProvider>();
+            }, () =>
             {
                 var allTypeObjects = ClientMetadataProvider.GetSchema(null) as object[];
 
@@ -96,7 +139,10 @@ namespace SenseNet.ContentRepository.Tests
         [TestCategory("Metadata")]
         public void ClientMetadataProvider_GetSchema_SingleType()
         {
-            Test(() =>
+            Test2(services =>
+            {
+                services.AddSingleton<IClientMetadataProvider, ClientMetadataProvider>();
+            }, () =>
             {
                 var typeObjects = ClientMetadataProvider.GetSchema(null, "File") as object[];
 
@@ -116,7 +162,10 @@ namespace SenseNet.ContentRepository.Tests
         {
             // make sure that null values are not rendered to save time and bandwidth
 
-            Test(() =>
+            Test2(services =>
+            {
+                services.AddSingleton<IClientMetadataProvider, ClientMetadataProvider>();
+            }, () =>
             {
                 var allTypeObjects = ClientMetadataProvider.GetSchema(null) as object[];
 

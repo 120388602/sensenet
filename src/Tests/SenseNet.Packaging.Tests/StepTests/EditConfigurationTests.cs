@@ -1,12 +1,16 @@
 ﻿using System;
-using System.Configuration;
 using System.Linq;
 using System.Text;
 using System.Xml;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
+using SenseNet.Configuration;
+using SenseNet.ContentRepository.InMemory;
+using SenseNet.ContentRepository.Storage.Data;
 using SenseNet.Packaging.Steps;
 using SenseNet.Packaging.Tests.Implementations;
-using SenseNet.Tests;
+using SenseNet.Testing;
+using SenseNet.Tests.Core;
 
 namespace SenseNet.Packaging.Tests.StepTests
 {
@@ -40,10 +44,15 @@ namespace SenseNet.Packaging.Tests.StepTests
         [TestInitialize]
         public void PrepareTest()
         {
+            Providers.Instance = new Providers(new ServiceCollection()
+                .AddSingleton<DataProvider, InMemoryDataProvider>()
+                .AddSingleton<IPackagingDataProvider, InMemoryPackageStorageProvider>()
+                .BuildServiceProvider());
+
             // preparing logger
             _log = new StringBuilder();
             var loggers = new[] { new PackagingTestLogger(_log) };
-            var loggerAcc = new PrivateType(typeof(Logger));
+            var loggerAcc = new TypeAccessor(typeof(Logger));
             loggerAcc.SetStaticField("_loggers", loggers);
         }
 
@@ -71,7 +80,7 @@ namespace SenseNet.Packaging.Tests.StepTests
             Assert.IsNull(step.Move);
             Assert.IsNull(step.Delete);
 
-            var acc = new PrivateObject(step);
+            var acc = new ObjectAccessor(step);
             var moves = (EditConfiguration.MoveOperation[])acc.Invoke("ParseMoveElements");
             var deletes = (EditConfiguration.DeleteOperation[])acc.Invoke("ParseDeleteElements");
 
@@ -99,7 +108,7 @@ namespace SenseNet.Packaging.Tests.StepTests
             Assert.AreEqual(1, step.Delete.Count());
             try
             {
-                var acc = new PrivateObject(step);
+                var acc = new ObjectAccessor(step);
                 var deletes = (EditConfiguration.DeleteOperation[])acc.Invoke("ParseDeleteElements");
             }
             catch (Exception e)
@@ -126,7 +135,7 @@ namespace SenseNet.Packaging.Tests.StepTests
 </EditConfiguration>");
 
             Assert.AreEqual(8, step.Delete.Count());
-            var acc = new PrivateObject(step);
+            var acc = new ObjectAccessor(step);
             var deletes = (EditConfiguration.DeleteOperation[]) acc.Invoke("ParseDeleteElements");
             Assert.AreEqual(8, deletes.Length);
             Assert.AreEqual("section1", deletes[0].Section);
@@ -155,7 +164,7 @@ namespace SenseNet.Packaging.Tests.StepTests
             Assert.AreEqual(1, step.Move.Count());
             try
             {
-                var acc = new PrivateObject(step);
+                var acc = new ObjectAccessor(step);
                 var moves = (EditConfiguration.DeleteOperation[])acc.Invoke("ParseMoveElements");
             }
             catch (Exception e)
@@ -178,7 +187,7 @@ namespace SenseNet.Packaging.Tests.StepTests
             Assert.AreEqual(1, step.Move.Count());
             try
             {
-                var acc = new PrivateObject(step);
+                var acc = new ObjectAccessor(step);
                 var moves = (EditConfiguration.DeleteOperation[])acc.Invoke("ParseMoveElements");
             }
             catch (Exception e)
@@ -201,7 +210,7 @@ namespace SenseNet.Packaging.Tests.StepTests
             Assert.AreEqual(1, step.Move.Count());
             try
             {
-                var acc = new PrivateObject(step);
+                var acc = new ObjectAccessor(step);
                 var moves = (EditConfiguration.DeleteOperation[])acc.Invoke("ParseMoveElements");
             }
             catch (Exception e)
@@ -224,7 +233,7 @@ namespace SenseNet.Packaging.Tests.StepTests
             Assert.AreEqual(1, step.Move.Count());
             try
             {
-                var acc = new PrivateObject(step);
+                var acc = new ObjectAccessor(step);
                 var moves = (EditConfiguration.DeleteOperation[])acc.Invoke("ParseMoveElements");
             }
             catch (Exception e)
@@ -247,7 +256,7 @@ namespace SenseNet.Packaging.Tests.StepTests
             Assert.AreEqual(1, step.Move.Count());
             try
             {
-                var acc = new PrivateObject(step);
+                var acc = new ObjectAccessor(step);
                 var moves = (EditConfiguration.DeleteOperation[])acc.Invoke("ParseMoveElements");
             }
             catch (Exception e)
@@ -271,7 +280,7 @@ namespace SenseNet.Packaging.Tests.StepTests
             Assert.AreEqual(1, step.Move.Count());
             try
             {
-                var acc = new PrivateObject(step);
+                var acc = new ObjectAccessor(step);
                 var moves = (EditConfiguration.DeleteOperation[])acc.Invoke("ParseMoveElements");
             }
             catch (Exception e)
@@ -294,7 +303,7 @@ namespace SenseNet.Packaging.Tests.StepTests
             Assert.AreEqual(1, step.Move.Count());
             try
             {
-                var acc = new PrivateObject(step);
+                var acc = new ObjectAccessor(step);
                 var moves = (EditConfiguration.DeleteOperation[])acc.Invoke("ParseMoveElements");
             }
             catch (Exception e)
@@ -335,7 +344,7 @@ namespace SenseNet.Packaging.Tests.StepTests
 
             Assert.IsNull(step.Delete);
             Assert.AreEqual(10, step.Move.Count());
-            var acc = new PrivateObject(step);
+            var acc = new ObjectAccessor(step);
             var moves = (EditConfiguration.MoveOperation[]) acc.Invoke("ParseMoveElements");
             Assert.AreEqual(10, moves.Length);
             CheckMoveOperation(moves[0], "section1", "section2", "*", null, null);
@@ -1100,8 +1109,8 @@ namespace SenseNet.Packaging.Tests.StepTests
 
         /* ---------------------------------------------------------------------------------------------- */
 
-        [TestMethod]
-        public void Step_EditConfiguration_DeleteKey()
+        [TestMethod, TestCategory("Services")]
+        public void Step_EditConfiguration_DeleteKey_CSrv()
         {
             var config = @"<?xml version='1.0' encoding='utf-8'?>
 <configuration>

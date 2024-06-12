@@ -252,12 +252,13 @@ paket-files/
 *.sln.iml
 
 # sensenet
-/src/nuget/content/Admin/tools/install-services.zip
-/src/nuget/snadmin/install-services/scripts/Create_SenseNet_Database.sql
-/src/nuget/snadmin/install-services/scripts/Create_SenseNet_Azure_Database.sql
-/src/nuget/snadmin/install-services/scripts/Install_01_Schema.sql
-/src/nuget/snadmin/install-services/scripts/Install_02_Procs.sql
-/src/nuget/snadmin/install-services/scripts/Install_03_Data_Phase1.sql
-/src/nuget/snadmin/install-services/scripts/Install_04_Data_Phase2.sql
-/src/nuget/snadmin/install-services/scripts/Install_Security.sql
+/src/nuget/content/Admin/tools/*.zip
+/src/nuget/snadmin/install-services/scripts
+/src/nuget/snadmin/install-services-core/import
+/src/nuget/snadmin/install-services-core/scripts
 /docs/nlb-environment.md
+/src/Services.Core.Install/*.zip
+**/App_Data/LuceneIndex
+**/App_Data/LocalIndex
+**/App_Data/Logs
+/src/WebApps/**/install-services-core

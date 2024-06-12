@@ -1,8 +1,8 @@
 ﻿using System;
-using System.Configuration;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using SenseNet.ContentRepository;
 using SenseNet.ContentRepository.Storage;
+using Task = System.Threading.Tasks.Task;
 
 namespace SenseNet.Packaging.Tests
 {
@@ -48,7 +48,7 @@ namespace SenseNet.Packaging.Tests
             var component = new TestComponent(componentName, supportedVersionString, false);
             try
             {
-                var componentInfo = SnComponentInfo.Create(component);
+                var _ = SnComponentInfo.Create(component);
                 Assert.Fail();
             }
             catch (ApplicationException)
@@ -58,23 +58,23 @@ namespace SenseNet.Packaging.Tests
         }
 
         [TestMethod]
-        public void Packaging_EzRelease_MissingComponent_CannotRun()
+        public async Task Packaging_EzRelease_MissingComponent_CannotRun()
         {
             // Missing component cannot run
             Assert.IsFalse(RunComponent(C("CompA", "7.1.0", "7.1.0")));
 
             // Install and run
-            SavePackage("CompA", "7.1.0", "02:00", "2016-01-01", PackageType.Install, ExecutionResult.Successful);
+            await SavePackage("CompA", "7.1.0", "02:00", "2016-01-01", PackageType.Install, ExecutionResult.Successful);
             Assert.IsTrue(RunComponent(C("CompA", "7.1.0", "7.1.0")));
         }
         [TestMethod]
-        public void Packaging_EzRelease_InstalledComponent_CanRun()
+        public async Task Packaging_EzRelease_InstalledComponent_CanRun()
         {
-            SavePackage("CompA", "7.1.0", "02:00", "2016-01-01", PackageType.Install, ExecutionResult.Successful);
+            await SavePackage("CompA", "7.1.0", "02:00", "2016-01-01", PackageType.Install, ExecutionResult.Successful);
             Assert.IsTrue(RunComponent(C("CompA", "7.1.0", "7.1.0")));
         }
         [TestMethod]
-        public void Packaging_EzRelease_CustomizedVersionCheckerAllows_CanRun()
+        public async Task Packaging_EzRelease_CustomizedVersionCheckerAllows_CanRun()
         {
             var invoked = false;
             var permittingFunction = new Func<Version, bool>(v =>
@@ -82,12 +82,12 @@ namespace SenseNet.Packaging.Tests
                 invoked = true;
                 return true;
             });
-            SavePackage("CompA", "7.1.0", "02:00", "2016-01-01", PackageType.Install, ExecutionResult.Successful);
+            await SavePackage("CompA", "7.1.0", "02:00", "2016-01-01", PackageType.Install, ExecutionResult.Successful);
             Assert.IsTrue(RunComponent(C("CompA", "7.1.0", "7.1.0", permittingFunction)));
             Assert.IsTrue(invoked, "The function was not invoked.");
         }
         [TestMethod]
-        public void Packaging_EzRelease_CustomizedVersionCheckerDenies_CannotRun()
+        public async Task Packaging_EzRelease_CustomizedVersionCheckerDenies_CannotRun()
         {
             var invoked = false;
             var permittingFunction = new Func<Version, bool>(v =>
@@ -95,23 +95,23 @@ namespace SenseNet.Packaging.Tests
                 invoked = true;
                 return false;
             });
-            SavePackage("CompA", "7.1.0", "02:00", "2016-01-01", PackageType.Install, ExecutionResult.Successful);
+            await SavePackage("CompA", "7.1.0", "02:00", "2016-01-01", PackageType.Install, ExecutionResult.Successful);
             Assert.IsFalse(RunComponent(C("CompA", "7.1.0", "7.1.0", permittingFunction)));
             Assert.IsTrue(invoked, "The function was not invoked.");
         }
-        [TestMethod]
-        public void Packaging_EzRelease_CompatibleComponent_CanRun()
+        [TestMethod, TestCategory("Services")]
+        public async Task Packaging_EzRelease_CompatibleComponent_CanRun_CSrv()
         {
-            SavePackage("CompA", "7.1.0", "02:00", "2016-01-01", PackageType.Install, ExecutionResult.Successful);
-            SavePackage("CompA", "7.1.1", "02:00", "2016-01-02", PackageType.Patch, ExecutionResult.Successful);
+            await SavePackage("CompA", "7.1.0", "02:00", "2016-01-01", PackageType.Install, ExecutionResult.Successful);
+            await SavePackage("CompA", "7.1.1", "02:00", "2016-01-02", PackageType.Patch, ExecutionResult.Successful);
             Assert.IsTrue(RunComponent(C("CompA", "7.1.2", "7.1.0")));
         }
         [TestMethod]
-        public void Packaging_EzRelease_InCompatibleComponent_CannotRun()
+        public async Task Packaging_EzRelease_InCompatibleComponent_CannotRun()
         {
-            SavePackage("CompA", "7.1.0", "02:00", "2016-01-01", PackageType.Install, ExecutionResult.Successful);
-            SavePackage("CompA", "7.1.1", "02:00", "2016-01-02", PackageType.Patch, ExecutionResult.Successful);
-            SavePackage("CompA", "7.1.2", "02:00", "2016-01-03", PackageType.Patch, ExecutionResult.Successful);
+            await SavePackage("CompA", "7.1.0", "02:00", "2016-01-01", PackageType.Install, ExecutionResult.Successful);
+            await SavePackage("CompA", "7.1.1", "02:00", "2016-01-02", PackageType.Patch, ExecutionResult.Successful);
+            await SavePackage("CompA", "7.1.2", "02:00", "2016-01-03", PackageType.Patch, ExecutionResult.Successful);
             Assert.IsFalse(RunComponent(C("CompA", "7.2.0", "7.2.0")));
         }
 
@@ -153,6 +153,12 @@ namespace SenseNet.Packaging.Tests
         {
             public string ComponentId { get; }
             public Version SupportedVersion { get; }
+
+            // ReSharper disable once UnusedMember.Local
+            public TestComponent()
+            {
+                // Default contructor is needed to support automatic instantiation.
+            }
             public TestComponent(string componentId, string supportedVersion, bool allowed = true)
             {
                 ComponentId = componentId;
@@ -164,6 +170,11 @@ namespace SenseNet.Packaging.Tests
             public bool IsComponentAllowed(Version componentVersion)
             {
                 return _allowed;
+            }
+
+            public virtual void AddPatches(PatchBuilder builder)
+            {
+                // do nothing
             }
         }
     }

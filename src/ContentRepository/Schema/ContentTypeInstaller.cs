@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using SenseNet.ContentRepository.Storage.Events;
 using SenseNet.ContentRepository.Storage.Schema;
 using System.IO;
+using System.Threading;
 using System.Xml.XPath;
 using SenseNet.Configuration;
 using SenseNet.Tools;
@@ -107,12 +108,20 @@ namespace SenseNet.ContentRepository.Schema
             _editor.Register();
 
             // The ContentTypeManager distributes its reset, no custom DistributedAction call needed
-            ContentTypeManager.Reset();
+            ContentTypeManager.Reset(); // necessary (ExecuteBatch)
         }
 
         private void Install(Ctd ctd)
         {
             var contentType = ContentTypeManager.LoadOrCreateNew(ctd.Document);
+
+            if (contentType.IsInvalid)
+            {
+                // registering a content type with an invalid handler or field is not allowed
+                throw new ContentRegistrationException(
+                    $"Error during installing content type {contentType.Name}. Please check the log for " +
+                    "a registration error or warning.");
+            }
 
             // skip notification during content type install to avoid missing field errors
             contentType.DisableObserver(TypeResolver.GetType(NodeObserverNames.NOTIFICATION, false));
@@ -142,15 +151,25 @@ namespace SenseNet.ContentRepository.Schema
         }
 
 
+        [Obsolete("Use async version instead", true)]
         public static void RemoveContentType(string contentTypeName)
         {
-            RemoveContentType(ContentTypeManager.Instance.GetContentTypeByName(contentTypeName));
+            RemoveContentTypeAsync(ContentTypeManager.Instance.GetContentTypeByName(contentTypeName), CancellationToken.None)
+                .ConfigureAwait(false).GetAwaiter().GetResult();
         }
+        public static System.Threading.Tasks.Task RemoveContentTypeAsync(string contentTypeName, CancellationToken cancel)
+        {
+            return RemoveContentTypeAsync(ContentTypeManager.Instance.GetContentTypeByName(contentTypeName), cancel);
+        }
+
+        [Obsolete("Use async version instead", true)]
         public static void RemoveContentType(ContentType contentType)
         {
-            contentType.Delete();
-            // The ContentTypeManager distributes its reset, no custom DistributedAction call needed
-            ContentTypeManager.Reset();
+            RemoveContentTypeAsync(contentType, CancellationToken.None).ConfigureAwait(false).GetAwaiter().GetResult();
+        }
+        public static System.Threading.Tasks.Task RemoveContentTypeAsync(ContentType contentType, CancellationToken cancel)
+        {
+            return contentType.DeleteAsync(cancel);
         }
     }
 }

@@ -1,4 +1,6 @@
 ﻿using System;
+using System.Threading;
+using SenseNet.Configuration;
 using SenseNet.ContentRepository.Schema;
 using SenseNet.ContentRepository.Search;
 using SenseNet.ContentRepository.Storage;
@@ -23,16 +25,17 @@ namespace SenseNet.ContentRepository
         {
             base.OnCreating(sender, e);
 
-            if (!SearchManager.ContentQueryIsAllowed)
+            if (!Providers.Instance.SearchManager.ContentQueryIsAllowed)
                 return;
 
             var parent = e.SourceNode.Parent;
             var searchPath = parent is Voting ? parent.Path : parent.ParentPath;
 
             // Count Voting Items
-            var votingItemCount = ContentQuery.Query(SafeQueries.InTreeAndTypeIsCountOnly,
-                new QuerySettings { EnableAutofilters = FilterStatus.Disabled },
-                searchPath, typeof(VotingItem).Name).Count;
+            var votingItemCount = ContentQuery.QueryAsync(SafeQueries.InTreeAndTypeIsCountOnly,
+                    new QuerySettings {EnableAutofilters = FilterStatus.Disabled}, CancellationToken.None,
+                    searchPath, nameof(VotingItem))
+                .ConfigureAwait(false).GetAwaiter().GetResult().Count;
 
             // Get children (VotingItems) count
             String tempName;

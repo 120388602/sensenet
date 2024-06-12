@@ -2,13 +2,15 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using SenseNet.Search.Indexing;
 using SenseNet.Search.Querying;
 using SenseNet.Search.Querying.Parser;
 using SenseNet.Search.Tests.Implementations;
-using SenseNet.Tests;
-using SenseNet.Tests.Implementations;
+using SenseNet.Tests.Core;
+using SenseNet.Tests.Core.Implementations;
 
 namespace SenseNet.Search.Tests
 {
@@ -46,15 +48,15 @@ namespace SenseNet.Search.Tests
             };
 
         [TestMethod, TestCategory("IR")]
-        public void SnQuery_Result_Int()
+        public async Task SnQuery_Result_Int()
         {
             var intResults = new Dictionary<string, QueryResult<int>> { { "asdf", new QueryResult<int>(new[] { 1, 2, 3 }, 4) } };
             var context = new TestQueryContext(QuerySettings.AdminSettings, 0, _indexingInfo, new TestQueryEngine(intResults, null));
-            using (Tools.Swindle(typeof(SnQuery), "_permissionFilterFactory", new EverythingAllowedPermissionFilterFactory()))
+            using (SenseNet.Tests.Core.Tools.Swindle(typeof(SnQuery), "_permissionFilterFactory", new EverythingAllowedPermissionFilterFactory()))
             {
                 var queryText = "asdf";
 
-                var result = SnQuery.Query(queryText, context);
+                var result = await SnQuery.QueryAsync(queryText, context, CancellationToken.None);
 
                 var expected = string.Join(", ", intResults[queryText].Hits.Select(x => x.ToString()).ToArray());
                 var actual = string.Join(", ", result.Hits.Select(x => x.ToString()).ToArray());
@@ -64,7 +66,7 @@ namespace SenseNet.Search.Tests
         }
 
         [TestMethod, TestCategory("IR")]
-        public void SnQuery_Result_String()
+        public async Task SnQuery_Result_String()
         {
             var stringResults = new Dictionary<string, QueryResult<string>>
             {
@@ -72,11 +74,11 @@ namespace SenseNet.Search.Tests
             };
 
             var context = new TestQueryContext(QuerySettings.AdminSettings, 0, _indexingInfo, new TestQueryEngine(null, stringResults));
-            using (Tools.Swindle(typeof(SnQuery), "_permissionFilterFactory", new EverythingAllowedPermissionFilterFactory()))
+            using (SenseNet.Tests.Core.Tools.Swindle(typeof(SnQuery), "_permissionFilterFactory", new EverythingAllowedPermissionFilterFactory()))
             {
                 var queryText = "asdf";
 
-                var result = SnQuery.QueryAndProject(queryText, context);
+                var result = await SnQuery.QueryAndProjectAsync(queryText, context, CancellationToken.None);
 
                 var expected = string.Join(", ", stringResults[queryText].Hits);
                 var actual = string.Join(", ", result.Hits);
@@ -198,8 +200,8 @@ namespace SenseNet.Search.Tests
             Assert.AreEqual(expectedQueryText, queryTextAfter);
         }
 
-        [TestMethod, TestCategory("IR")]
-        public void SnQuery_Classify_UsedFieldNames()
+        [TestMethod, TestCategory("IR"), TestCategory("Services")]
+        public void SnQuery_Classify_UsedFieldNames_CSrv()
         {
             var indexingInfo = new Dictionary<string, IPerFieldIndexingInfo>
             {

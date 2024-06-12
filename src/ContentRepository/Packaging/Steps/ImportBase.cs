@@ -1,25 +1,25 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
 using SenseNet.ContentRepository.Storage;
 using SNC = SenseNet.ContentRepository;
 using IO = System.IO;
 using System.Diagnostics;
 using System.Xml;
-using System.Xml.Xsl;
 using SenseNet.ContentRepository;
 using SenseNet.Portal.Handlers;
-using SenseNet.Search;
 using SenseNet.ContentRepository.Schema;
 using System.Reflection;
+using System.Threading;
 using SenseNet.ContentRepository.Storage.Search;
-using SenseNet.ContentRepository.Storage.Data;
 using System.Timers;
 using SenseNet.Configuration;
-using SenseNet.ContentRepository.Search.Querying;
+using SenseNet.ContentRepository.i18n;
+using SenseNet.ContentRepository.Search.Indexing;
 using SenseNet.ContentRepository.Storage.Security;
 using SenseNet.Security;
+using SenseNet.Storage;
+using Timer = System.Timers.Timer;
 
 namespace SenseNet.Packaging.Steps
 {
@@ -56,6 +56,35 @@ namespace SenseNet.Packaging.Steps
             {
                 RepositoryEnvironment.WorkingMode.SetImporting(savedMode);
             }
+        }
+
+        /// <summary>
+        /// Internal import API that lets callers import items from the file system to the repository.
+        /// The repository must be started before calling this method.
+        /// </summary>
+        internal static void Import(string sourcePath, string targetPath = null)
+        {
+            if (!Repository.Started())
+                throw new InvalidOperationException("Please start the repository before running the import.");
+
+            if (string.IsNullOrEmpty(sourcePath))
+                throw new ArgumentNullException(nameof(sourcePath));
+
+            if (!string.IsNullOrEmpty(targetPath))
+            {
+                if (RepositoryPath.IsValidPath(targetPath) != RepositoryPath.PathResult.Correct)
+                    throw new InvalidPathException($"Invalid target path: {targetPath}");
+            }
+            else
+            {
+                targetPath = Repository.RootPath;
+            }
+
+            var importer = new ImporterClass();
+            importer.Run(null, sourcePath, targetPath, ImportLogLevel.Verbose, false);
+
+            if (importer.ErrorOccured)
+                throw new ApplicationException("Error occured during importing, please review the log.");
         }
 
         [DebuggerDisplay("ContentInfo: Name={Name}; ContentType={ContentTypeName}; IsFolder={IsFolder} ({Attachments.Count} Attachments)")]
@@ -376,7 +405,8 @@ namespace SenseNet.Packaging.Steps
                 if (resetSecurity)
                 {
                     Log(ImportLogLevel.Info, "Installing default security structure");
-                    SecurityHandler.SecurityInstaller.InstallDefaultSecurityStructure();
+                    new SecurityInstaller(Providers.Instance.SecurityHandler, Providers.Instance.StorageSchema,
+                        Providers.Instance.DataStore).InstallDefaultSecurityStructure();
                 }
 
                 // Elevation: there can be folders where even admins
@@ -397,6 +427,8 @@ namespace SenseNet.Packaging.Steps
                         ImportSchema(fsPath);
                     }
 
+                    Cache.Reset();
+
                     var firstImport = SaveInitialIndexDocuments();
                     if (firstImport)
                     {
@@ -405,17 +437,32 @@ namespace SenseNet.Packaging.Steps
                         var operators = Node.Load<Group>(Identifiers.OperatorsGroupPath);
 
                         admins.AddMember(admin);
-                        admins.Save();
+                        admins.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                         operators.AddMember(admins);
-                        operators.Save();
+                        operators.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                     }
+
+                    // Import resources
+                    var localizationRoot = Content.Load("/Root/Localization");
+                    if (localizationRoot == null)
+                    {
+                        localizationRoot = Content.CreateNew("Resources", Repository.Root, "Localization");
+                        localizationRoot.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
+                    }
+                    ImportResources(fsPath);
+
+                    // Reindex Schema (other contents are re-imported and re-indexed below)
+                    Providers.Instance.IndexPopulator.RebuildIndexAsync(Repository.SchemaFolder, CancellationToken.None,
+                        recursive: true,
+                        rebuildLevel: IndexRebuildLevel.DatabaseAndIndex)
+                        .ConfigureAwait(true).GetAwaiter().GetResult();
 
                     // Import Contents
                     if (!string.IsNullOrEmpty(fsPath))
                     {
                         ImportSettings(fsPath);
-                        ImportContents(fsPath, repositoryPath, false, false);
+                        ImportContents(fsPath, repositoryPath, false, false, false);
                     }
                     else
                     {
@@ -424,8 +471,10 @@ namespace SenseNet.Packaging.Steps
 
                     if (firstImport)
                     {
-                        SetInitialPermissions();
+                        SetInitialStates();
                     }
+
+                    Log(ImportLogLevel.Info, "Content import is successfully finished.");
                 }
             }
 
@@ -471,6 +520,31 @@ namespace SenseNet.Packaging.Steps
                     ImportContentTypeDefinitionsAndAspects(ctdPath, aspectPath);
             }
 
+            private void ImportResources(string fsPath)
+            {
+                // Check if the import structure contains the global resources folder. If yes,
+                // import global resources before other content.
+
+                string srcPath = null;
+                fsPath = IO.Path.GetFullPath(fsPath);
+
+                // 1. if the import target is /Root, check if \\source\Localization exists
+                // 2. if the import target is /Root/Localization, import settings from \\source
+                // 3. in any other case the source structure does not contain any resource content
+
+                if (RepositoryPathEquals(Repository.RootPath))
+                    srcPath = IO.Path.Combine(fsPath, "Localization");
+                else if (RepositoryPathEquals("/Root/Localization"))
+                    srcPath = fsPath;
+
+                if (srcPath == null || !IO.Directory.Exists(srcPath))
+                    return;
+
+                Log(ImportLogLevel.Info, "Installing global resources.");
+                ImportContents(srcPath, "/Root/Localization", false, false, true);
+                Log(ImportLogLevel.Info, "Ok");
+            }
+
             private void ImportSettings(string fsPath)
             {
                 // Check if the import structure contains the global settings folder. If yes,
@@ -495,13 +569,14 @@ namespace SenseNet.Packaging.Steps
                     return;
 
                 Log(ImportLogLevel.Info, "Installing global settings.");
-                ImportContents(srcPath, Repository.SettingsFolderPath, false, true);
+                ImportContents(srcPath, Repository.SettingsFolderPath, false, true, false);
                 Log(ImportLogLevel.Info, "Ok");
             }
 
             private bool SaveInitialIndexDocuments()
             {
-                var idSet = DataProvider.LoadIdsOfNodesThatDoNotHaveIndexDocument(0, 1100);
+                var idSet = Providers.Instance.DataStore
+                    .LoadNotIndexedNodeIdsAsync(0, 1100, CancellationToken.None).GetAwaiter().GetResult();
                 var nodes = Node.LoadNodes(idSet);
                 var count = 0;
 
@@ -512,8 +587,9 @@ namespace SenseNet.Packaging.Steps
 
                 foreach (var node in nodes)
                 {
-                    bool hasBinary;
-                    DataBackingStore.SaveIndexDocument(node, false, false, out hasBinary);
+                    Providers.Instance.DataStore
+                        .SaveIndexDocumentAsync(node, false, false, CancellationToken.None)
+                        .GetAwaiter().GetResult();
                     Log(ImportLogLevel.Verbose, "  " + node.Path);
                     count++;
                 }
@@ -521,12 +597,20 @@ namespace SenseNet.Packaging.Steps
                 return count > 0;
             }
 
-            private void SetInitialPermissions()
+            private void SetInitialStates()
             {
-                Log(ImportLogLevel.Info, "Set initial permissions...");
+                Log(ImportLogLevel.Info, "Set initial property values ...");
+
+                var rootNode = Node.Load<PortalRoot>(Identifiers.PortalRootId);
+                rootNode.PreviewEnabled = PreviewEnabled.Yes;
+                rootNode.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
+
+                Log(ImportLogLevel.Info, "Set initial membership ...");
 
                 // ContentType ids
                 var RootContentId = Identifiers.PortalRootId;
+                var GenericContentTypeId = ContentType.GetByName("GenericContent").Id;
+                var contentTypeId = ContentType.GetByName("ContentType").Id;
                 var FolderContentTypeId = ContentType.GetByName("Folder").Id;
                 var SystemFolderContentTypeId = ContentType.GetByName("SystemFolder").Id;
                 var SurveyItemContentTypeId = ContentType.GetByName("SurveyItem")?.Id ?? 0;
@@ -538,6 +622,12 @@ namespace SenseNet.Packaging.Steps
                 var FileContentTypeId = ContentType.GetByName("File").Id;
                 var ExecutableFileContentTypeId = ContentType.GetByName("ExecutableFile").Id;
                 var ListItemContentTypeId = ContentType.GetByName("ListItem").Id;
+                
+                var fieldSettingContentTypeId = ContentType.GetByName("FieldSettingContent")?.Id ?? 0;
+                var portalRootContentTypeId = ContentType.GetByName("PortalRoot")?.Id ?? 0;
+                var runtimeContentContainerContentTypeId = ContentType.GetByName("RuntimeContentContainer")?.Id ?? 0;
+                var sitesContentTypeId = ContentType.GetByName("Sites")?.Id ?? 0;
+                var sharingGroupContentTypeId = ContentType.GetByName("SharingGroup")?.Id ?? 0;
 
                 // Identity ids
                 var AdministratorNodeId = Identifiers.AdministratorUserId;
@@ -547,23 +637,36 @@ namespace SenseNet.Packaging.Steps
 
                 var DevelopersGroupId = Node.LoadNode("/Root/IMS/BuiltIn/Portal/Developers")?.Id ?? 0;
                 var contentExplorersGroup = Node.LoadNode("/Root/IMS/BuiltIn/Portal/ContentExplorers");
+                var publicAdminsGroupId = Node.LoadNode("/Root/IMS/Public/Administrators")?.Id ?? 0;
 
                 // Set initial memberships: these relations must be set here manually because
                 // these content were created by the install SQL scripts without the security 
                 // component involved.
                 var orgUnits = new List<OrganizationalUnit> { OrganizationalUnit.Portal }; // built-in orgunit for system groups and users
-                orgUnits.AddRange(NodeQuery.QueryNodesByTypeAndPath(ActiveSchema.NodeTypes["OrganizationalUnit"], false, OrganizationalUnit.Portal.Path, true).Nodes.Cast<OrganizationalUnit>());
+                orgUnits.AddRange(NodeQuery.QueryNodesByTypeAndPath(
+                    Providers.Instance.StorageSchema.NodeTypes["OrganizationalUnit"], false, OrganizationalUnit.Portal.Path, true)
+                    .Nodes.Cast<OrganizationalUnit>());
 
                 foreach (var orgUnit in orgUnits)
                 {
                     var users = orgUnit.Children.Where(c => c is User).Select(u => u.Id).ToArray();
                     var groups = orgUnit.Children.Where(c => c is Group || c is OrganizationalUnit).Select(g => g.Id).ToArray();
 
-                    SecurityHandler.AddMembers(orgUnit.Id, users, groups);
+                    Providers.Instance.SecurityHandler.AddMembersAsync(orgUnit.Id, users, groups,
+                        CancellationToken.None).GetAwaiter().GetResult();
                 }
 
+                Log(ImportLogLevel.Info, "Set initial permissions...");
+
                 // Created for several operations
-                var aclEd = SecurityHandler.CreateAclEditor();
+                var aclEd = Providers.Instance.SecurityHandler.CreateAclEditor();
+
+                // Allow all permissions on Root to the built-in admin group
+                aclEd.Allow(RootContentId, AdministratorGroupNodeId, false, PermissionType.BuiltInPermissionTypes);
+
+                // Apply changes because later we want to break inheritance on child nodes and that requires that
+                // the permissions we want to copy already exist on parents. This cannot be done in one round.
+                aclEd.ApplyAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                 // Break the permission inheritance on several content
                 aclEd.BreakInheritance(SystemFolderContentTypeId, new[] { EntryType.Normal })
@@ -612,23 +715,59 @@ namespace SenseNet.Packaging.Steps
                         .Allow(SystemFolderContentTypeId, DevelopersGroupId, false, PermissionType.See, PermissionType.Open, PermissionType.RunApplication);
                 }
 
-                if (EveryoneGroupId != 0)
-                {
-                    // Allow See on common content types for everyone (workspace, list, file, listitem)
-                    aclEd.Allow(WorkspaceContentTypeId, EveryoneGroupId, true, PermissionType.See)              // LOCAL only
-                        .Allow(ContentListContentTypeId, EveryoneGroupId, false, PermissionType.See)
-                        .Allow(FileContentTypeId, EveryoneGroupId, true, PermissionType.See)                    // LOCAL only
-                        .Allow(ContentType.GetByName("Image").Id, EveryoneGroupId, false, PermissionType.See)
-                        .Allow(FolderContentTypeId, EveryoneGroupId, true, PermissionType.See)                  // LOCAL only
-                        .Allow(ListItemContentTypeId, EveryoneGroupId, false, PermissionType.See);
-                }
+                // Allow See on common content types for everyone (workspace, list, file, listitem)
+                aclEd.Allow(WorkspaceContentTypeId, EveryoneGroupId, true, PermissionType.See)              // LOCAL only
+                    .Allow(ContentListContentTypeId, EveryoneGroupId, false, PermissionType.See)
+                    .Allow(FileContentTypeId, EveryoneGroupId, true, PermissionType.See)                    // LOCAL only
+                    .Allow(ContentType.GetByName("Image").Id, EveryoneGroupId, false, PermissionType.See)
+                    .Allow(FolderContentTypeId, EveryoneGroupId, true, PermissionType.See)                  // LOCAL only
+                    .Allow(ListItemContentTypeId, EveryoneGroupId, false, PermissionType.See);
+                
                 if (contentExplorersGroup != null)
                 {
                     aclEd.Allow(RootContentId, contentExplorersGroup.Id, true, PermissionType.Open);
                 }
 
+                // break inheritance on certain system types to hide them
+                if (fieldSettingContentTypeId != 0)
+                    aclEd.BreakInheritance(fieldSettingContentTypeId, new[] { EntryType.Normal });
+                if (portalRootContentTypeId != 0)
+                    aclEd.BreakInheritance(portalRootContentTypeId, new[] { EntryType.Normal });
+                if (runtimeContentContainerContentTypeId != 0)
+                    aclEd.BreakInheritance(runtimeContentContainerContentTypeId, new[] { EntryType.Normal });
+                if (sitesContentTypeId != 0)
+                    aclEd.BreakInheritance(sitesContentTypeId, new[] { EntryType.Normal });
+                if (sharingGroupContentTypeId != 0)
+                    aclEd.BreakInheritance(sharingGroupContentTypeId, new[] { EntryType.Normal });
+
+                // anybody can modify and delete CTDs created by themselves
+                aclEd.Allow(GenericContentTypeId, Identifiers.OwnersGroupId, false,
+                    PermissionType.Save, PermissionType.AddNew, PermissionType.Delete, PermissionType.SetPermissions);
+
+                // set permissions for public admins
+                if (publicAdminsGroupId != 0)
+                {
+                    // Although public admins get strong permissions here, the content protector feature
+                    // will prevent them (and anybody else) deleting certain built-in content types.
+                    aclEd.Allow(GenericContentTypeId, publicAdminsGroupId, false, 
+                        PermissionType.Save, PermissionType.AddNew, PermissionType.Delete, PermissionType.SetPermissions)
+                        .Allow(contentTypeId, publicAdminsGroupId, false, PermissionType.See);
+
+                    // Public admins must not be able to modify built-in CTDs:
+                    // DENY local Save, Delete, SetPermissions permission on protected paths.
+                    foreach (var protectedId in Providers.Instance.ContentProtector.GetProtectedPaths().Where(p =>
+                                 SNC.Storage.RepositoryPath.IsInTree(p, Repository.ContentTypesFolderPath))
+                                 .Select(NodeHead.Get).Where(nh => nh != null)
+                                 .Select(nh => nh.Id))
+                    {
+                        // deny all strong permissions locally on built-in content types
+                        aclEd.Deny(protectedId, publicAdminsGroupId, true, 
+                            PermissionType.Save, PermissionType.Delete, PermissionType.SetPermissions);
+                    }
+                }
+
                 // Apply all changes
-                aclEd.Apply();
+                aclEd.ApplyAsync(CancellationToken.None).GetAwaiter().GetResult();
             }
 
             public void ImportContentTypeDefinitionsAndAspects(string ctdPath, string aspectsPath)
@@ -638,7 +777,7 @@ namespace SenseNet.Packaging.Steps
                     Log(ImportLogLevel.Info, "Importing content types: " + ctdPath);
 
                     ContentTypeInstaller importer = ContentTypeInstaller.CreateBatchContentTypeInstaller();
-                    var ctdFiles = IO.Directory.GetFiles(ctdPath, "*.xml");
+                    var ctdFiles = FileSystemWrapper.Directory.GetFilesByExtension(ctdPath, ".xml");
                     foreach (var ctdFilePath in ctdFiles)
                     {
                         using (var stream = new IO.FileStream(ctdFilePath, IO.FileMode.Open, IO.FileAccess.Read))
@@ -675,14 +814,15 @@ namespace SenseNet.Packaging.Steps
                     if (!Node.Exists(Repository.AspectsFolderPath))
                     {
                         Log(ImportLogLevel.Info, "Creating aspect container (" + Repository.AspectsFolderPath + ")...");
-                        Content.CreateNew(typeof(SystemFolder).Name, Repository.SchemaFolder, "Aspects").Save();
+                        Content.CreateNew(typeof(SystemFolder).Name, Repository.SchemaFolder, "Aspects")
+                            .SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                         Log(ImportLogLevel.Info, "  Ok");
                     }
 
-                    var aspectFiles = System.IO.Directory.GetFiles(aspectsPath, "*.content");
+                    var aspectFiles = FileSystemWrapper.Directory.GetFilesByExtension(aspectsPath, ".content");
                     Log(ImportLogLevel.Info, "Importing aspects:");
 
-                    ImportContents(aspectsPath, Repository.AspectsFolderPath, true, false);
+                    ImportContents(aspectsPath, Repository.AspectsFolderPath, true, false, false);
 
                     Log(ImportLogLevel.Info, "  " + aspectFiles.Length + " aspect" + (aspectFiles.Length > 1 ? "s" : "") + " imported.");
                     Log(ImportLogLevel.Progress, "Ok");
@@ -696,7 +836,7 @@ namespace SenseNet.Packaging.Steps
             private int _contentCount;
 
             // ImportContents
-            public void ImportContents(string srcPath, string targetPath, bool aspects, bool settings)
+            public void ImportContents(string srcPath, string targetPath, bool aspects, bool settings, bool resources)
             {
                 bool pathIsFile = false;
                 if (IO.File.Exists(srcPath))
@@ -734,7 +874,7 @@ namespace SenseNet.Packaging.Steps
 
                     _contentCount = 0;
                     using (CreateProgressBar())
-                        TreeWalker(srcPath, pathIsFile, importTarget, "  ", aspects, settings);
+                        TreeWalker(srcPath, pathIsFile, importTarget, "  ", aspects, settings, resources);
                     Log(ImportLogLevel.Info, "{0} contents imported.", _contentCount);
 
                     if (HasReference)
@@ -746,8 +886,10 @@ namespace SenseNet.Packaging.Steps
                 }
             }
 
-            private void TreeWalker(string path, bool pathIsFile, Node folder, string indent, bool aspects, bool settings)
+            private void TreeWalker(string path, bool pathIsFile, Node folder, string indent, bool aspects, bool settings, bool resources)
             {
+                // ALGORITHM:
+                // check whether skip or not
                 // get entries
                 // get contents
                 // foreach contents
@@ -756,11 +898,12 @@ namespace SenseNet.Packaging.Steps
                 //   entries.remove(contentinfo.attachments)
                 // foreach entries
                 //   create contentinfo
-                if (!aspects)
+
+                var insensitive = StringComparison.InvariantCultureIgnoreCase;
+
+                if (!resources)
                 {
-                    if (folder != null && (
-                        String.Compare(folder.Path, Repository.AspectsFolderPath, StringComparison.InvariantCultureIgnoreCase) == 0 ||
-                        String.Compare(folder.Path, Repository.ContentTypesFolderPath, StringComparison.InvariantCultureIgnoreCase) == 0))
+                    if (folder != null && String.Compare(folder.Path, "/Root/Localization", insensitive) == 0)
                     {
                         if (LogLevel == ImportLogLevel.Progress)
                             Console.WriteLine();
@@ -768,9 +911,23 @@ namespace SenseNet.Packaging.Steps
                         return;
                     }
                 }
+
+                if (!aspects)
+                {
+                    if (folder != null && (
+                        String.Compare(folder.Path, Repository.AspectsFolderPath, insensitive) == 0 ||
+                        String.Compare(folder.Path, Repository.ContentTypesFolderPath, insensitive) == 0))
+                    {
+                        if (LogLevel == ImportLogLevel.Progress)
+                            Console.WriteLine();
+                        Log(ImportLogLevel.Progress, "Skipped path: " + path);
+                        return;
+                    }
+                }
+
                 if (!settings)
                 {
-                    if (folder != null && (string.Compare(folder.Path, Repository.SettingsFolderPath, StringComparison.InvariantCultureIgnoreCase) == 0))
+                    if (folder != null && (string.Compare(folder.Path, Repository.SettingsFolderPath, insensitive) == 0))
                     {
                         if (LogLevel == ImportLogLevel.Progress)
                             Console.WriteLine();
@@ -793,7 +950,7 @@ namespace SenseNet.Packaging.Steps
                 else
                 {
                     paths = new List<string>(IO.Directory.GetFileSystemEntries(path));
-                    contentPaths = new List<string>(IO.Directory.GetFiles(path, "*.content"));
+                    contentPaths = new List<string>(FileSystemWrapper.Directory.GetFilesByExtension(path, ".content"));
                 }
 
                 foreach (string contentPath in contentPaths)
@@ -861,7 +1018,7 @@ namespace SenseNet.Packaging.Steps
                             if (Node.Exists(rpath))
                             {
                                 Log(ImportLogLevel.Verbose, indent + contentInfo.Name + " : [DELETE]");
-                                Content.DeletePhysical(rpath);
+                                Content.ForceDeleteAsync(rpath, CancellationToken.None).ConfigureAwait(false).GetAwaiter().GetResult();
                             }
                             else
                             {
@@ -893,7 +1050,7 @@ namespace SenseNet.Packaging.Steps
                             if (!contentInfo.SetMetadata(content, currentDir, isNewContent, false))
                                 PrintFieldErrors(content, contentInfo.MetaDataPath);
                             if (content.ContentHandler.Id == 0)
-                                content.ContentHandler.Save();
+                                content.ContentHandler.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                         }
                         catch (Exception e)
                         {
@@ -906,7 +1063,8 @@ namespace SenseNet.Packaging.Steps
                             content.ContentHandler.Security.RemoveExplicitEntries();
                             if (!(contentInfo.HasReference || contentInfo.HasPermissions || contentInfo.HasBreakPermissions))
                             {
-                                content.ContentHandler.Security.RemoveBreakInheritance();
+                                content.ContentHandler.Security.RemoveBreakInheritanceAsync(CancellationToken.None)
+                                    .GetAwaiter().GetResult();
                             }
                         }
                         if (contentInfo.HasReference || contentInfo.HasPermissions || contentInfo.HasBreakPermissions || 
@@ -925,7 +1083,7 @@ namespace SenseNet.Packaging.Steps
                             node = content.ContentHandler;
                         if (node != null && (contentInfo.IsFolder || contentInfo.ChildrenFolder != null))
                         {
-                            TreeWalker(contentInfo.ChildrenFolder, false, node, indent + "  ", aspects, settings);
+                            TreeWalker(contentInfo.ChildrenFolder, false, node, indent + "  ", aspects, settings, resources);
                         }
                     }
                 }
@@ -1157,6 +1315,5 @@ namespace SenseNet.Packaging.Steps
                 }
             }
         }
-
     }
 }

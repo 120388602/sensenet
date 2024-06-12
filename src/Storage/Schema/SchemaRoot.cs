@@ -1,14 +1,19 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.Text;
 using System.Data;
 using SenseNet.ContentRepository.Storage.Data;
 using System.Globalization;
 using System.Xml;
 using SenseNet.Diagnostics;
-using System.Diagnostics;
 using System.Linq;
+using System.Threading;
+using SenseNet.Configuration;
+using SenseNet.ContentRepository.Storage.DataModel;
+// ReSharper disable ArrangeThisQualifier
 
+// ReSharper disable once CheckNamespace
 namespace SenseNet.ContentRepository.Storage.Schema
 {
     public abstract class SchemaRoot : ISchemaRoot
@@ -17,10 +22,10 @@ namespace SenseNet.ContentRepository.Storage.Schema
 
         private class NodeTypeInfo
         {
-            public int Id;
-            public int ParentId;
-            public string Name;
-            public string ClassName;
+            public readonly int Id;
+            public readonly int ParentId;
+            public readonly string Name;
+            public readonly string ClassName;
 
             public NodeTypeInfo(int id, int parentId, string name, string className)
             {
@@ -83,21 +88,114 @@ namespace SenseNet.ContentRepository.Storage.Schema
             using (var op = SnTrace.Database.StartOperation("Load storage schema."))
             {
                 Clear();
-                DataSet dataSet = DataProvider.Current.LoadSchema();
-                Load(dataSet);
+                var schemaData = Providers.Instance.DataStore.LoadSchemaAsync(CancellationToken.None).GetAwaiter().GetResult();
+                Load(schemaData);
                 op.Successful = true;
             }
         }
+        public void Load(string schemaXml)
+        {
+            var xml = new XmlDocument();
+            xml.LoadXml(schemaXml);
+            Load(xml);
+        }
         public void Load(XmlDocument schemaXml)
         {
+            Clear();
             Load(BuildDataSetFromXml(schemaXml));
+        }
+
+        // -------------------------------------------------------------------------------- Load from RepositorySchemaData
+
+        private void Load(RepositorySchemaData schemaData)
+        {
+            BuildPropertyTypes(schemaData.PropertyTypes);
+            BuildNodeTypes(schemaData.NodeTypes);
+            BuildContentListTypes(schemaData.ContentListTypes);
+
+            SchemaTimestamp = schemaData.Timestamp;
+        }
+
+        private void BuildPropertyTypes(IEnumerable<PropertyTypeData> data)
+        {
+            foreach (var item in data)
+                CreatePropertyType(item.Id, item.Name, item.DataType, item.Mapping, item.IsContentListProperty);
+        }
+        private void BuildNodeTypes(IEnumerable<NodeTypeData> data)
+        {
+            var nodeTypes = data.ToList();
+
+            while (nodeTypes.Count > 0)
+            {
+                for (var i = nodeTypes.Count - 1; i >= 0; i--)
+                {
+                    var nti = nodeTypes[i];
+                    NodeType parent = null;
+                    if (nti.ParentName == null || (parent = _nodeTypes[nti.ParentName]) != null)
+                    {
+                        var type = CreateNodeType(nti.Id, parent, nti.Name, nti.ClassName);
+                        BuildProperties(type, nti.Properties);
+                        nodeTypes.Remove(nti);
+                    }
+                }
+            }
+        }
+        private void BuildContentListTypes(IEnumerable<ContentListTypeData> data)
+        {
+            foreach (var item in data)
+            {
+                var type = CreateContentListType(item.Id, item.Name);
+                BuildProperties(type, item.Properties);
+            }
+        }
+        private void BuildProperties(PropertySet type, IEnumerable<string> propertyNames)
+        {
+            foreach (var propertyName in propertyNames)
+            {
+                var propertyType = _propertyTypes[propertyName];
+                if (propertyType == null)
+                    throw new InvalidSchemaException(
+                        SR.Exceptions.Schema.Msg_PropertyTypeDoesNotExist + ": name=" + type.Name + "." + propertyName);
+
+                AddPropertyTypeToPropertySet(propertyType, type);
+            }
+        }
+
+        // -------------------------------------------------------------------------------- ToRepositorySchemaData
+
+        public RepositorySchemaData ToRepositorySchemaData()
+        {
+            return new RepositorySchemaData
+            {
+                PropertyTypes = _propertyTypes.Select(p => new PropertyTypeData
+                {
+                    Id = p.Id,
+                    Name = p.Name,
+                    DataType = p.DataType,
+                    Mapping = p.Mapping,
+                    IsContentListProperty = p.IsContentListProperty
+                }).ToList(),
+                NodeTypes = _nodeTypes.Select(n => new NodeTypeData
+                {
+                    Id = n.Id,
+                    Name = n.Name,
+                    ParentName = n.Parent?.Name,
+                    ClassName = n.ClassName,
+                    Properties = n.DeclaredPropertyTypes.Select(p => p.Name).ToList()
+                }).ToList(),
+                ContentListTypes = _contentListTypes.Select(c => new ContentListTypeData
+                {
+                    Id = c.Id,
+                    Name = c.Name,
+                    Properties = c.PropertyTypes.Select(p => p.Name).ToList()
+                }).ToList(),
+            };
         }
 
         // -------------------------------------------------------------------------------- Load from DataSet
 
         private void Load(DataSet dataSet)
         {
-
             Dictionary<int, DataType> dataTypeHelper = BuildDataTypeHelper(dataSet);
             Dictionary<int, PropertySetType> propertySetTypeHelper = BuildPropertySetTypeHelper(dataSet);
 
@@ -119,7 +217,8 @@ namespace SenseNet.ContentRepository.Storage.Schema
             if (rows.Count == 0)
                 return 0;
             var row = rows[0];
-            return SenseNet.ContentRepository.Storage.Data.SqlClient.SqlProvider.GetLongFromBytes((byte[])row["Timestamp"]);
+            //return DataProvider.GetLongFromBytes((byte[])row["Timestamp"]);
+            throw new NotSupportedException();
         }
         private static Dictionary<int, DataType> BuildDataTypeHelper(DataSet dataSet)
         {
@@ -476,8 +575,8 @@ namespace SenseNet.ContentRepository.Storage.Schema
         }
         public PropertyType CreateContentListPropertyType(DataType dataType, int ordinalNumber)
         {
-            string name = String.Concat("#", dataType, "_", ordinalNumber);
-            int mapping = ordinalNumber + DataProvider.Current.ContentListMappingOffsets[dataType];
+            var name = string.Concat("#", dataType, "_", ordinalNumber);
+            var mapping = ordinalNumber + ContentListMappingOffsets[dataType];
             return CreateContentListPropertyType(name, dataType, mapping);
         }
         private PropertyType CreateContentListPropertyType(string name, DataType dataType, int mapping)
@@ -486,7 +585,7 @@ namespace SenseNet.ContentRepository.Storage.Schema
         }
         private PropertyType CreatePropertyType(int id, string name, DataType dataType, int mapping, bool isContentListProperty)
         {
-            PropertyType propType = new PropertyType(this, name, id, dataType, mapping, isContentListProperty);
+            var propType = new PropertyType(this, name, id, dataType, mapping, isContentListProperty);
             this.PropertyTypes.Add(propType);
 
             return propType;
@@ -503,9 +602,33 @@ namespace SenseNet.ContentRepository.Storage.Schema
             // remove slot
             this.PropertyTypes.Remove(propertyType);
         }
+
+        #region Backward compatibility
+
+        private static readonly int _contentListStartPage = 10000000;
+        internal static readonly int StringPageSize = 80;
+        internal static readonly int IntPageSize = 40;
+        internal static readonly int DateTimePageSize = 25;
+        internal static readonly int CurrencyPageSize = 15;
+
+        private static IDictionary<DataType, int> ContentListMappingOffsets { get; } =
+            new ReadOnlyDictionary<DataType, int>(new Dictionary<DataType, int>
+            {
+                {DataType.String, StringPageSize * _contentListStartPage},
+                {DataType.Int, IntPageSize * _contentListStartPage},
+                {DataType.DateTime, DateTimePageSize * _contentListStartPage},
+                {DataType.Currency, CurrencyPageSize * _contentListStartPage},
+                {DataType.Binary, 0},
+                {DataType.Reference, 0},
+                {DataType.Text, 0}
+            });
+
+        #endregion
+
         #endregion
 
         #region NodeType
+        [Obsolete("Do not create NodeType without valid classname.", true)]
         public NodeType CreateNodeType(NodeType parent, string name)
         {
             return CreateNodeType(parent, name, null);
@@ -514,7 +637,7 @@ namespace SenseNet.ContentRepository.Storage.Schema
         {
             return CreateNodeType(0, parent, name, className);
         }
-        private NodeType CreateNodeType(int id, NodeType parent, string name, string className)
+        internal NodeType CreateNodeType(int id, NodeType parent, string name, string className)
         {
             NodeType nodeType = new NodeType(id, name, this, className, parent);
             this.NodeTypes.Add(nodeType);
@@ -643,6 +766,7 @@ namespace SenseNet.ContentRepository.Storage.Schema
                     return true;
             return false;
         }
+
 
     }
 }

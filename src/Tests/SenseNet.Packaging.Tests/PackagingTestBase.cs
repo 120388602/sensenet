@@ -1,16 +1,22 @@
 ﻿using System;
-using System.Diagnostics;
 using System.IO;
-using System.Security.Policy;
+using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Xml;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
+using SenseNet.Configuration;
 using SenseNet.ContentRepository;
+using SenseNet.ContentRepository.InMemory;
 using SenseNet.ContentRepository.Storage;
 using SenseNet.ContentRepository.Storage.Data;
-using SenseNet.Diagnostics;
+using SenseNet.Extensions.DependencyInjection;
 using SenseNet.Packaging.Tests.Implementations;
-using SenseNet.Tests;
+using SenseNet.Testing;
+using SenseNet.Tests.Core;
+using Task = System.Threading.Tasks.Task;
 
 namespace SenseNet.Packaging.Tests
 {
@@ -21,7 +27,7 @@ namespace SenseNet.Packaging.Tests
         public static void InitializeAssembly(TestContext context)
         {
             //TODO: Find a correct solution to avoid assembly duplications and remove this line
-            var dummy = typeof(SenseNet.Portal.OData.ODataHandler).Name;
+            var dummy = typeof(SenseNet.Portal.PortalSettings).Name;
         }
 
         protected static StringBuilder _log;
@@ -31,11 +37,13 @@ namespace SenseNet.Packaging.Tests
             // preparing logger
             _log = new StringBuilder();
             var loggers = new[] { new PackagingTestLogger(_log) };
-            var loggerAcc = new PrivateType(typeof(Logger));
+            var loggerAcc = new TypeAccessor(typeof(Logger));
             loggerAcc.SetStaticField("_loggers", loggers);
 
-            var builder = CreateRepositoryBuilderForTest();
-            builder.UsePackagingDataProviderExtension(new TestPackageStorageProvider());
+            var builder = CreateRepositoryBuilderForTest(services =>
+            {
+                services.AddSingleton<IPackagingDataProvider, InMemoryPackageStorageProvider>();
+            });
 
             RepositoryVersionInfo.Reset();
         }
@@ -45,9 +53,25 @@ namespace SenseNet.Packaging.Tests
             // do nothing
         }
 
+//protected override RepositoryBuilder CreateRepositoryBuilderForTestInstance(Action<IServiceCollection> modifyServices = null)
+//{
+//    var builder = base.CreateRepositoryBuilderForTestInstance(modifyServices);
+//    builder.UsePackagingDataProvider(new TestPackageStorageProvider());
+
+//    return builder;
+//}
+        protected override IServiceProvider CreateServiceProviderForTest(Action<IConfigurationBuilder> modifyConfig = null, Action<IServiceCollection> modifyServices = null)
+        {
+            return base.CreateServiceProviderForTest(null, services =>
+            {
+                services.AddSingleton<IPackagingDataProvider, TestPackageStorageProvider>();
+                modifyServices?.Invoke(services);
+            });
+        }
+
         /*================================================= tools */
 
-        protected void SavePackage(string id, string version, string execTime, string releaseDate, PackageType packageType, ExecutionResult result)
+        protected async Task SavePackage(string id, string version, string execTime, string releaseDate, PackageType packageType, ExecutionResult result)
         {
             var package = new Package
             {
@@ -60,7 +84,10 @@ namespace SenseNet.Packaging.Tests
                 ExecutionResult = result,
                 PackageType = packageType,
             };
-            PackageManager.Storage.SavePackage(package);
+
+            await PackageManager.Storage.SavePackageAsync(package, CancellationToken.None);
+
+            RepositoryVersionInfo.Reset();
         }
 
         protected Manifest ParseManifestHead(string manifestXml)
@@ -91,7 +118,7 @@ namespace SenseNet.Packaging.Tests
             PackagingResult result;
             do
             {
-                result = ExecutePhase(manifestXml, ++phase, console ?? new StringWriter());
+                result = ExecutePhase(manifestXml, ++phase, console);
                 errors += result.Errors;
             } while (result.NeedRestart);
             result.Errors = errors;
@@ -100,10 +127,17 @@ namespace SenseNet.Packaging.Tests
         protected PackagingResult ExecutePhase(XmlDocument manifestXml, int phase, TextWriter console = null)
         {
             var manifest = Manifest.Parse(manifestXml, phase, true, new PackageParameter[0]);
-            var executionContext = ExecutionContext.CreateForTest("packagePath", "targetPath", new string[0], "sandboxPath", manifest, phase, manifest.CountOfPhases, null, console ?? new StringWriter());
+            var executionContext = ExecutionContext.CreateForTest("packagePath", "targetPath", new string[0], "sandboxPath", manifest, phase, manifest.CountOfPhases, null, console);
             var result = PackageManager.ExecuteCurrentPhase(manifest, executionContext);
             RepositoryVersionInfo.Reset();
             return result;
+        }
+
+        protected Package[] LoadPackages()
+        {
+            var dataProvider = Providers.Instance.Services.GetRequiredService<IPackagingDataProvider>();
+            return dataProvider.LoadInstalledPackagesAsync(CancellationToken.None)
+                .ConfigureAwait(false).GetAwaiter().GetResult().ToArray();
         }
 
     }

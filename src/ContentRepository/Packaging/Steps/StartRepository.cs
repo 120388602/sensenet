@@ -1,4 +1,5 @@
 ﻿using System;
+using SenseNet.Configuration;
 using SenseNet.ContentRepository;
 using SenseNet.ContentRepository.Search;
 
@@ -47,19 +48,25 @@ namespace SenseNet.Packaging.Steps
                         indexPath = System.IO.Path.GetFullPath(System.IO.Path.Combine(context.TargetPath, indexPath));
                 }
             }
-            var startIndexingEngine = _startIndexingEngineChanged ? StartIndexingEngine : SearchManager.IsOuterEngineEnabled;
+            var startIndexingEngine = _startIndexingEngineChanged
+                ? StartIndexingEngine
+                : Providers.Instance.SearchManager.IsOuterEngineEnabled;
 
             Logger.LogMessage("startIndexingEngine: " + startIndexingEngine);
             Logger.LogMessage("indexPath: " + indexPath);
 
-            Repository.Start(new RepositoryStartSettings
+            var startSettings = (context.RepositoryStartSettings ?? new RepositoryBuilder(context.RepositoryStartSettings.Services)
             {
                 StartIndexingEngine = startIndexingEngine,
                 PluginsPath = PluginsPath ?? context.SandboxPath,
                 IndexPath = indexPath,
                 StartWorkflowEngine = StartWorkflowEngine,
                 Console = context.Console
-            });
+            }) as RepositoryBuilder;
+
+            // make sure we call the appropriate Start method
+            // with the RepositoryBuilder parameter
+            Repository.Start(startSettings);
 
             context.Console.WriteLine("Ok.");
 

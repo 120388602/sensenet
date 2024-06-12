@@ -1,4 +1,6 @@
 ﻿using System;
+using System.Threading;
+using System.Threading.Tasks;
 using SenseNet.Communication.Messaging;
 using SenseNet.Configuration;
 using SenseNet.Diagnostics;
@@ -12,20 +14,30 @@ namespace SenseNet.ContentRepository.Storage.Caching.Dependency
     {
         #region private class FireChangedDistributedAction
         [Serializable]
-        private class FireChangedDistributedAction : DistributedAction
+        public class FireChangedDistributedAction : DistributedAction
         {
-            private readonly int _nodeTypeId;
+            public override string TraceMessage => $"NodeTypeDependency: {NodeTypeId}";
+
+            private int _nodeTypeId;
+
+            public int NodeTypeId
+            {
+                get => _nodeTypeId;
+                set => _nodeTypeId = value;
+            }
 
             public FireChangedDistributedAction(int nodeTypeId)
             {
                 _nodeTypeId = nodeTypeId;
             }
 
-            public override void DoAction(bool onRemote, bool isFromMe)
+            public override Task DoActionAsync(bool onRemote, bool isFromMe, CancellationToken cancellationToken)
             {
                 if (onRemote && isFromMe)
-                    return;
+                    return Task.CompletedTask;
                 FireChangedPrivate(_nodeTypeId);
+
+                return Task.CompletedTask;
             }
         }
         #endregion
@@ -47,7 +59,7 @@ namespace SenseNet.ContentRepository.Storage.Caching.Dependency
         /// </summary>
         public static void FireChanged(int nodeTypeId)
         {
-            new FireChangedDistributedAction(nodeTypeId).Execute();
+            new FireChangedDistributedAction(nodeTypeId).ExecuteAsync(CancellationToken.None).GetAwaiter().GetResult();
         }
         private static void FireChangedPrivate(int nodeTypeId)
         {

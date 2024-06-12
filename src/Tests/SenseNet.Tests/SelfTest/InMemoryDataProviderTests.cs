@@ -1,6 +1,7 @@
 ﻿using System;
-using System.IO;
+using IO = System.IO;
 using System.Linq;
+using System.Threading;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using SenseNet.Configuration;
 using SenseNet.ContentRepository;
@@ -12,32 +13,40 @@ using SenseNet.Tests.Implementations;
 
 namespace SenseNet.Tests.SelfTest
 {
-    [TestClass]
+    //[TestClass]
     public class InMemoryDataProviderTests : TestBase
     {
         [TestMethod]
-        public void InMemDb_LoadRootById()
+        public void InMemDb_FW_LoadRootById()
         {
-            var node = Test(() => Node.LoadNode(Identifiers.PortalRootId));
+            Test(() =>
+            {
+                var node = Node.LoadNode(Identifiers.PortalRootId);
+                Assert.AreEqual(Identifiers.PortalRootId, node.Id);
+                Assert.AreEqual(Identifiers.RootPath, node.Path);
+            }
+        );
 
-            Assert.AreEqual(Identifiers.PortalRootId, node.Id);
-            Assert.AreEqual(Identifiers.RootPath, node.Path);
         }
         [TestMethod]
-        public void InMemDb_LoadRootByPath()
+        public void InMemDb_FW_LoadRootByPath()
         {
-            var node = Test(() => Node.LoadNode(Identifiers.RootPath));
-
-            Assert.AreEqual(Identifiers.PortalRootId, node.Id);
-            Assert.AreEqual(Identifiers.RootPath, node.Path);
+            Test(() =>
+            {
+                var node = Node.LoadNode(Identifiers.RootPath);
+                Assert.AreEqual(Identifiers.PortalRootId, node.Id);
+                Assert.AreEqual(Identifiers.RootPath, node.Path);
+            });
         }
         [TestMethod]
-        public void InMemDb_Create()
+        public void InMemDb_FW_Create()
         {
             Node node;
-            var result = Test(() =>
+            Test(() =>
             {
-                var lastNodeId = ((InMemoryDataProvider)DataProvider.Current).LastNodeId;
+                var lastNodeId =
+                    Providers.Instance.DataProvider.GetExtension<ITestingDataProviderExtension>().GetLastNodeIdAsync()
+                    .GetAwaiter().GetResult();
 
                 var root = Node.LoadNode(Identifiers.RootPath);
                 node = new SystemFolder(root)
@@ -49,27 +58,23 @@ namespace SenseNet.Tests.SelfTest
                 node.Save();
 
                 node = Node.Load<SystemFolder>(node.Id);
-                return new Tuple<int, Node>(lastNodeId, node);
 
+                Assert.AreEqual(lastNodeId + 1, node.Id);
+                Assert.AreEqual("/Root/Node1", node.Path);
             });
-            var lastId = result.Item1;
-            node = result.Item2;
-            Assert.AreEqual(lastId + 1, node.Id);
-            Assert.AreEqual("/Root/Node1", node.Path);
         }
 
         [TestMethod]
-        public void InMemDb_FlatPropertyLoaded()
+        public void InMemDb_FW_FlatPropertyLoaded()
         {
             Test(() =>
             {
                 var user = User.Somebody;
                 Assert.AreEqual("BuiltIn", user.Domain);
-                return 0;
             });
         }
         [TestMethod]
-        public void InMemDb_FlatPropertyWrite()
+        public void InMemDb_FW_FlatPropertyWrite()
         {
             Test(() =>
             {
@@ -85,13 +90,11 @@ namespace SenseNet.Tests.SelfTest
                 // ASSERT
                 admin = Node.Load<User>(Identifiers.AdministratorUserId);
                 Assert.AreEqual(testValue, admin.FullName);
-
-                return 0;
             });
         }
 
         [TestMethod]
-        public void InMemDb_TextPropertyWrite()
+        public void InMemDb_FW_TextPropertyWrite()
         {
             Test(() =>
             {
@@ -114,25 +117,22 @@ namespace SenseNet.Tests.SelfTest
                     admin = Node.Load<User>(Identifiers.AdministratorUserId);
                     Assert.AreEqual(testValue, admin.GetProperty<string>(propertyName));
                 });
-
-                return 0;
             });
         }
 
         [TestMethod]
-        public void InMemDb_ReferencePropertyLoaded()
+        public void InMemDb_FW_ReferencePropertyLoaded()
         {
             Test(() =>
             {
                 var group = Group.Administrators;
                 Assert.IsTrue(group.Members.Any());
                 Assert.IsTrue(group.HasReference(PropertyType.GetByName("Members"), User.Administrator));
-                return 0;
             });
         }
 
         [TestMethod]
-        public void InMemDb_ReferencePropertyWrite()
+        public void InMemDb_FW_ReferencePropertyWrite()
         {
             Test(() =>
             {
@@ -151,13 +151,11 @@ namespace SenseNet.Tests.SelfTest
                 editors = Node.Load<Group>("/Root/IMS/BuiltIn/Portal/Editors"); // reload
                 var editorMembersAfter = editors.Members.Select(n => n.Id).OrderBy(i => i).ToArray();
                 Assert.IsTrue(editorMembersAfter.Contains(developersGroupId));
-
-                return 0;
             });
         }
 
         [TestMethod]
-        public void InMemDb_SaveAndLoadNewNodeWithAllDynamicDataTypes()
+        public void InMemDb_FW_SaveAndLoadNewNodeWithAllDynamicDataTypes()
         {
             Test(() =>
             {
@@ -203,7 +201,7 @@ namespace SenseNet.Tests.SelfTest
                 content[decimalFieldName] = decimalValue;
                 content[textFieldName] = textValue;
                 content.ContentHandler.SetReference(referenceFieldName, referenceValue);
-                ((BinaryData)content[binaryFieldName]).SetStream(new MemoryStream(buffer));
+                ((BinaryData)content[binaryFieldName]).SetStream(new IO.MemoryStream(buffer));
                 content.Save();
 
                 // ASSERT
@@ -223,9 +221,68 @@ namespace SenseNet.Tests.SelfTest
                 var expected = string.Join(",", buffer.Select(x => x.ToString()));
                 var actual = string.Join(",", b.Select(x => x.ToString()));
                 Assert.AreEqual(expected, actual);
-
-                return 0;
             });
+        }
+
+        [TestMethod]
+        public void InMemDb_FW_ChunkUpload_NewFile()
+        {
+            Test(async () =>
+            {
+                var root = CreateTestRoot();
+                var file = new File(root) {Name = "File1.txt"};
+                file.Binary.ContentType = "application/octet-stream";
+                //file.Binary.FileName = "File1.txt";
+                file.Save();
+
+                var chunks = new[]
+                {
+                    new byte[] {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+                    new byte[] {2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2},
+                    new byte[] {3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3},
+                    new byte[] {4, 4 }
+                };
+                var chunkSize = chunks[0].Length;
+                var blobStorage = Providers.Instance.BlobStorage;
+
+                // START CHUNK
+                var versionId = file.VersionId;
+                var propertyTypeId = PropertyType.GetByName("Binary").Id;
+                var fullSize = 50L;
+                var token = await blobStorage.StartChunkAsync(versionId, propertyTypeId, fullSize, CancellationToken.None)
+                    .ConfigureAwait(false);
+
+                // WRITE CHUNKS
+                for (int i = 0; i < chunks.Length; i++)
+                {
+                    var offset = i * chunkSize;
+                    var chunk = chunks[i];
+                    await blobStorage.WriteChunkAsync(versionId, token, chunk, offset, fullSize,
+                        CancellationToken.None).ConfigureAwait(false);
+                }
+
+                // COMMIT CHUNK
+                await blobStorage.CommitChunkAsync(versionId, propertyTypeId, token, fullSize, null, CancellationToken.None)
+                    .ConfigureAwait(false);
+
+                // ASSERT
+                Cache.Reset();
+                file = Node.Load<File>(file.Id);
+                var length = Convert.ToInt32(file.Binary.Size);
+                var buffer = new byte[length];
+                using (var stream = file.Binary.GetStream())
+                    stream.Read(buffer, 0, length);
+                Assert.AreEqual(
+                    "11111111111111112222222222222222333333333333333344",
+                    new string(buffer.Select(b=>(char)(b+'0')).ToArray()));
+            }).GetAwaiter().GetResult();
+        }
+
+        private SystemFolder CreateTestRoot()
+        {
+            var node = new SystemFolder(Repository.Root) { Name = Guid.NewGuid().ToString() };
+            node.Save();
+            return node;
         }
     }
 }

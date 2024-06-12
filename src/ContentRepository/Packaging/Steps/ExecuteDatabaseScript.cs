@@ -3,6 +3,12 @@ using System.Text;
 using System.Data;
 using SenseNet.ContentRepository.Storage.Data;
 using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
+using SenseNet.ContentRepository.Storage.Data.MsSqlClient;
+using SenseNet.Configuration;
+using SenseNet.Diagnostics;
+using SenseNet.Tools;
 
 namespace SenseNet.Packaging.Steps
 {
@@ -103,56 +109,60 @@ namespace SenseNet.Packaging.Steps
         }
         private void ExecuteSql(SqlScriptReader sqlReader, ExecutionContext context)
         {
-            while (sqlReader.ReadScript())
-            {
-                var script = sqlReader.Script;
-
-                var sb = new StringBuilder();
-                using (var proc = CreateDataProcedure(script, context))
-                {
-                    proc.CommandType = CommandType.Text;
-
-                    using (var reader = proc.ExecuteReader())
-                    {
-                        do
-                        {
-                            if (reader.HasRows)
-                            {
-                                var first = true;
-                                while (reader.Read())
-                                {
-                                    if (first)
-                                    {
-                                        for (int i = 0; i < reader.FieldCount; i++)
-                                            sb.Append(reader.GetName(i)).Append("\t");
-                                        Logger.LogMessage(sb.ToString());
-                                        sb.Clear();
-                                        first = false;
-                                    }
-                                    for (int i = 0; i < reader.FieldCount; i++)
-                                        sb.Append(reader[i]).Append("\t");
-                                    Logger.LogMessage(sb.ToString());
-                                    sb.Clear();
-                                }
-                            }
-                        } while (reader.NextResult());
-                    }
-                }
-            }
-            Logger.LogMessage("Script is successfully executed.");
-        }
-
-        private IDataProcedure CreateDataProcedure(string script, ExecutionContext context)
-        {
-            return DataProvider.Instance.CreateDataProcedure(script, new ConnectionInfo
+            var connectionInfo = new ConnectionInfo
             {
                 ConnectionName = (string)context.ResolveVariable(ConnectionName),
                 DataSource = (string)context.ResolveVariable(DataSource),
                 InitialCatalog = InitialCatalog,
                 InitialCatalogName = (string)context.ResolveVariable(InitialCatalogName),
-                UserName  = (string)context.ResolveVariable(UserName),
+                UserName = (string)context.ResolveVariable(UserName),
                 Password = (string)context.ResolveVariable(Password)
-            });
+            };
+            var connectionString = MsSqlDataContext.GetConnectionString(connectionInfo, context.ConnectionStrings)
+                                   ?? context.ConnectionStrings.Repository;
+
+            var iteration = 0;
+            while (sqlReader.ReadScript())
+            {
+                var script = sqlReader.Script;
+
+                var sb = new StringBuilder();
+
+                using var op = SnTrace.Database.StartOperation(() => "ExecuteDatabaseScript: " +
+                    $"ExecuteSql: iteration: {iteration++}, script: {script.ToTrace()}");
+
+                //TODO: [DIREF] get options from DI through constructor
+                using var ctx = new MsSqlDataContext(connectionString, DataOptions.GetLegacyConfiguration(),
+                    GetService<IRetrier>(), CancellationToken.None);
+                ctx.ExecuteReaderAsync(script, async (reader, cancel) =>
+                {
+                    do
+                    {
+                        if (reader.HasRows)
+                        {
+                            var first = true;
+                            while (await reader.ReadAsync(cancel).ConfigureAwait(false))
+                            {
+                                if (first)
+                                {
+                                    for (int i = 0; i < reader.FieldCount; i++)
+                                        sb.Append(reader.GetName(i)).Append("\t");
+                                    Logger.LogMessage(sb.ToString());
+                                    sb.Clear();
+                                    first = false;
+                                }
+                                for (int i = 0; i < reader.FieldCount; i++)
+                                    sb.Append(reader[i]).Append("\t");
+                                Logger.LogMessage(sb.ToString());
+                                sb.Clear();
+                            }
+                        }
+                    } while (await reader.NextResultAsync(cancel).ConfigureAwait(false));
+                    return Task.FromResult(0);
+                }).GetAwaiter().GetResult();
+                op.Successful = true;
+            }
+            Logger.LogMessage("Script is successfully executed.");
         }
     }
 }

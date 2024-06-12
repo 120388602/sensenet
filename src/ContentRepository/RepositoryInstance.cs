@@ -1,27 +1,22 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
 using SenseNet.ContentRepository.i18n;
 using SenseNet.ContentRepository.Storage;
-using System.Configuration;
 using System.Reflection;
 using SenseNet.Diagnostics;
 using System.IO;
+using System.Threading;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using SenseNet.Communication.Messaging;
-using SenseNet.BackgroundOperations;
 using SenseNet.Configuration;
 using SenseNet.ContentRepository.Schema;
-using SenseNet.ContentRepository.Search;
-using SenseNet.ContentRepository.Search.Indexing;
 using SenseNet.ContentRepository.Storage.Security;
-using SenseNet.Search;
-using SenseNet.Search.Indexing;
 using SenseNet.Search.Querying;
-using SenseNet.ContentRepository.Security;
-using SenseNet.ContentRepository.Storage.Data;
-using SenseNet.ContentRepository.Storage.Data.SqlClient;
+using SenseNet.TaskManagement.Core;
 using SenseNet.Tools;
+using EventId = SenseNet.Diagnostics.EventId;
 
 namespace SenseNet.ContentRepository
 {
@@ -77,7 +72,7 @@ namespace SenseNet.ContentRepository
         /// Gets the started up instance or null.
         /// </summary>
         public static RepositoryInstance Instance { get { return _instance; } }
-
+        
         public TextWriter Console => _settings?.Console;
 
         private RepositoryInstance()
@@ -85,6 +80,7 @@ namespace SenseNet.ContentRepository
             _startupInfo = new StartupInfo { Starting = DateTime.UtcNow };
         }
 
+        private ILogger<RepositoryInstance> _logger;
         private static bool _started;
         internal static RepositoryInstance Start(RepositoryStartSettings settings)
         {
@@ -97,6 +93,7 @@ namespace SenseNet.ContentRepository
                         var instance = new RepositoryInstance();
                         instance._settings = new RepositoryStartSettings.ImmutableRepositoryStartSettings(settings);
                         _instance = instance;
+                        _instance._logger = instance._settings.Services.GetService<ILogger<RepositoryInstance>>();
                         try
                         {
                             instance.DoStart();
@@ -114,52 +111,50 @@ namespace SenseNet.ContentRepository
         }
         internal void DoStart()
         {
-            ConsoleWriteLine();
-            ConsoleWriteLine("Starting Repository...");
-            ConsoleWriteLine();
+            ConsoleWriteLine(false);
+            ConsoleWriteLine(true, "Starting Repository.");
+            ConsoleWriteLine(false);
 
+            LoggingSettings.SnTraceConfigurator.ConfigureCategories();
             if (_settings.TraceCategories != null)
                 LoggingSettings.SnTraceConfigurator.UpdateCategories(_settings.TraceCategories);
-            else
-                LoggingSettings.SnTraceConfigurator.UpdateStartupCategories();
-
-            SearchManager.SetSearchEngineSupport(new SearchEngineSupport());
 
             InitializeLogger();
 
             RegisterAppdomainEventHandlers();
 
             if (_settings.IndexPath != null)
-                SearchManager.SetIndexDirectoryPath(_settings.IndexPath);
+                Providers.Instance.SearchManager.IndexDirectoryPath = _settings.IndexPath;
 
             LoadAssemblies(_settings.IsWebContext);
 
-            InitializeDataProviderExtensions();
+            _settings.Services.GetRequiredService<SecurityHandler>().StartSecurity(_settings.IsWebContext, _settings.Services);
 
-            SecurityHandler.StartSecurity(_settings.IsWebContext);
+            //UNDONE: modernize TemplateManager
+            // Set legacy collection from the new services collection and reset the
+            // current singleton list to force the system to regenerate it. 
+            TemplateManager.TemplateReplacerInstances =
+                _settings.Services.GetService<IEnumerable<TemplateReplacerBase>>()?.ToArray() ??
+                Array.Empty<TemplateReplacerBase>();
+            TemplateManager.Clear();
 
             SnQueryVisitor.VisitorExtensionTypes = new[] {typeof(Sharing.SharingVisitor)};
 
             // We have to log the access provider here because it cannot be logged 
             // during creation as it would lead to a circular reference.
-            SnLog.WriteInformation($"AccessProvider created: {AccessProvider.Current?.GetType().FullName}");
-
+            _logger.LogInformation($"AccessProvider created: {AccessProvider.Current?.GetType().FullName}");
             using (new SystemAccount())
                 StartManagers();
 
-            if (_settings.TraceCategories != null)
-                LoggingSettings.SnTraceConfigurator.UpdateCategories(_settings.TraceCategories);
-            else
-                LoggingSettings.SnTraceConfigurator.UpdateCategories();
-
-            InitializeOAuthProviders();
-
-            ConsoleWriteLine();
-            ConsoleWriteLine("Repository has started.");
-            ConsoleWriteLine();
+            LoggingSettings.SnTraceConfigurator.UpdateCategoriesBySettings();
+            
+            ConsoleWriteLine(false);
+            ConsoleWriteLine(true, "Repository has started.");
+            ConsoleWriteLine(false);
 
             _startupInfo.Started = DateTime.UtcNow;
         }
+
         /// <summary>
         /// Starts IndexingEngine if it is not running.
         /// </summary>
@@ -167,39 +162,40 @@ namespace SenseNet.ContentRepository
         {
             if (IndexingEngineIsRunning)
             {
-                ConsoleWrite("IndexingEngine has already started.");
+                ConsoleWrite(true, "IndexingEngine has already started.");
                 return;
             }
-            ConsoleWriteLine("Starting IndexingEngine:");
-
-            IndexManager.Start(_settings.Console);
-
-            ConsoleWriteLine("IndexingEngine has started.");
+            ConsoleWriteLine(true, "Starting IndexingEngine.");
+            Providers.Instance.IndexManager.StartAsync(_settings.Console, CancellationToken.None).GetAwaiter().GetResult();
+            Providers.Instance.SearchManager.SearchEngine.SetIndexingInfo(ContentTypeManager.Instance.IndexingInfo);
+            ConsoleWriteLine(true, "IndexingEngine has started.");
         }
+
+        private bool _workflowEngineIsRunning;
         /// <summary>
         /// Starts workflow engine if it is not running.
         /// </summary>
-
-        private bool _workflowEngineIsRunning;
         public void StartWorkflowEngine()
         {
             if (_workflowEngineIsRunning)
             {
-                ConsoleWrite("Workflow engine has already started.");
+                ConsoleWrite(true, "Workflow engine has already started.");
                 return;
             }
-            ConsoleWrite("Starting Workflow subsystem ... ");
+            ConsoleWrite(false, "Starting Workflow subsystem ... ");
             var t = TypeResolver.GetType("SenseNet.Workflow.InstanceManager", false);
             if (t != null)
             {
                 var m = t.GetMethod("StartWorkflowSystem", BindingFlags.Static | BindingFlags.Public);
                 m.Invoke(null, new object[0]);
                 _workflowEngineIsRunning = true;
-                ConsoleWriteLine("ok.");
+                ConsoleWriteLine(false, "ok.");
+                SnTrace.System.Write("Workflow subsystem started.");
             }
             else
             {
-                ConsoleWriteLine("NOT STARTED");
+                ConsoleWriteLine(false, "NOT STARTED");
+                SnTrace.System.Write("Workflow subsystem NOT STARTED.");
             }
         }
 
@@ -212,15 +208,15 @@ namespace SenseNet.ContentRepository
 
             if (!isWebContext)
             {
-                ConsoleWriteLine("Loading Assemblies from ", localBin, ":");
+                ConsoleWriteLine(false, "Loading Assemblies from ", localBin, ":");
                 asmNames = TypeResolver.LoadAssembliesFrom(localBin);
                 foreach (string name in asmNames)
-                    ConsoleWriteLine("  ", name);
+                    ConsoleWriteLine(false, "  ", name);
             }
 
             _startupInfo.ReferencedAssemblies = GetLoadedAsmNames().Except(_startupInfo.AssembliesBeforeStart).ToArray();
 
-            ConsoleWriteLine("Loading Assemblies from ", pluginsPath, ":");
+            ConsoleWriteLine(false, "Loading Assemblies from ", pluginsPath, ":");
             asmNames = TypeResolver.LoadAssembliesFrom(pluginsPath);
             _startupInfo.Plugins = GetLoadedAsmNames().Except(_startupInfo.AssembliesBeforeStart).Except(_startupInfo.ReferencedAssemblies).ToArray();
 
@@ -228,9 +224,9 @@ namespace SenseNet.ContentRepository
                 return;
 
             foreach (string name in asmNames)
-                ConsoleWriteLine("  ", name);
-            ConsoleWriteLine("Ok.");
-            ConsoleWriteLine();
+                ConsoleWriteLine(false, "  ", name);
+            ConsoleWriteLine(false, "Ok.");
+            ConsoleWriteLine(false);
         }
         private IEnumerable<string> GetLoadedAsmNames()
         {
@@ -243,39 +239,48 @@ namespace SenseNet.ContentRepository
 
             try
             {
-                BlobStorageComponents.DataProvider = Providers.Instance.BlobMetaDataProvider;
-                BlobStorageComponents.ProviderSelector = Providers.Instance.BlobProviderSelector;
+                ConsoleWrite(false, "Initializing cache ... ");
+                dummy = Cache.Count;
+                
+                // Log this, because logging is switched off when creating the cache provider
+                // to avoid circular reference.
+                _logger.LogInformation($"CacheProvider created: {Cache.Instance?.GetType().FullName}");
+                ConsoleWriteLine(false, "ok.");
+                SnTrace.System.Write("Cache initialized.");
 
-                ConsoleWrite("Initializing cache ... ");
-                dummy = DistributedApplication.Cache.Count;
-                ConsoleWriteLine("ok.");
+                ConsoleWrite(false, "Starting message channel ... ");
+                channel = Providers.Instance.ClusterChannelProvider;
+                channel.StartAsync(CancellationToken.None).GetAwaiter().GetResult();
+                ConsoleWriteLine(false, "ok.");
+                _logger.LogInformation($"Message channel started:  {channel.GetType().FullName}. " +
+                                       $"Instance id: {channel.ClusterMemberInfo.InstanceID}");
 
-                ConsoleWrite("Starting message channel ... ");
-                channel = DistributedApplication.ClusterChannel;
-                ConsoleWriteLine("ok.");
+                ConsoleWrite(false, "Sending greeting message ... ");
+                new PingMessage(new string[0]).SendAsync(CancellationToken.None).GetAwaiter().GetResult();
+                ConsoleWriteLine(false, "ok.");
+                SnTrace.System.Write("Greeting message sent (PingMessage).");
 
-                ConsoleWrite("Sending greeting message ... ");
-                (new PingMessage(new string[0])).Send();
-                ConsoleWriteLine("ok.");
+                ConsoleWrite(false, "Starting NodeType system ... ");
+                dummy = Providers.Instance.StorageSchema.NodeTypes[0];
+                ConsoleWriteLine(false, "ok.");
+                SnTrace.System.Write("NodeType system started.");
 
-                ConsoleWrite("Starting NodeType system ... ");
-                dummy = ActiveSchema.NodeTypes[0];
-                ConsoleWriteLine("ok.");
-
-                ConsoleWrite("Starting ContentType system ... ");
+                ConsoleWrite(false, "Starting ContentType system ... ");
                 dummy = ContentType.GetByName("GenericContent");
-                ConsoleWriteLine("ok.");
+                ConsoleWriteLine(false, "ok.");
+                SnTrace.System.Write("ContentType system started.");
 
-                ConsoleWrite("Starting AccessProvider ... ");
+                ConsoleWrite(false, "Starting AccessProvider ... ");
                 dummy = User.Current;
-                ConsoleWriteLine("ok.");
+                ConsoleWriteLine(false, "ok.");
+                SnTrace.System.Write("AccessProvider started.");
 
                 SnQuery.SetPermissionFilterFactory(Providers.Instance.PermissionFilterFactory);
 
                 if (_settings.StartIndexingEngine)
                     StartIndexingEngine();
                 else
-                    ConsoleWriteLine("IndexingEngine is not started.");
+                    ConsoleWriteLine(true, "IndexingEngine is not started.");
 
                 // switch on message processing after IndexingEngine was started.
                 channel.AllowMessageProcessing = true;
@@ -283,100 +288,53 @@ namespace SenseNet.ContentRepository
                 if (_settings.StartWorkflowEngine)
                     StartWorkflowEngine();
                 else
-                    ConsoleWriteLine("Workflow subsystem is not started.");
+                    ConsoleWriteLine(true, "Workflow subsystem is not started.");
 
-                ConsoleWrite("Loading string resources ... ");
+                ConsoleWrite(false, "Loading string resources ... ");
                 dummy = SenseNetResourceManager.Current;
-                ConsoleWriteLine("ok.");
+                ConsoleWriteLine(false, "ok.");
+                SnTrace.System.Write("String resources loaded.");
 
-                serviceInstances = new List<ISnService>();
-                foreach (var serviceType in TypeResolver.GetTypesByInterface(typeof(ISnService)))
+                _serviceInstances = _settings.Services.GetServices<ISnService>().ToList();
+
+                foreach (var service in _serviceInstances)
                 {
-                    var service = (ISnService)Activator.CreateInstance(serviceType);
                     service.Start();
-                    ConsoleWriteLine("Service started: ", serviceType.Name);
-                    serviceInstances.Add(service);
+                    ConsoleWriteLine(true, "Service started: " + service.GetType().Name);
                 }
 
                 // register this application in the task management component
-                SnTaskManager.RegisterApplication();
+                var taskManager = _settings.Services.GetRequiredService<ITaskManager>();
+                taskManager.RegisterApplicationAsync(CancellationToken.None).GetAwaiter().GetResult();
             }
             catch
             {
-                // If an error occoured, shut down the cluster channel.
-                channel?.ShutDown();
+                // If an error occurred, shut down the cluster channel.
+                channel?.ShutDownAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                 throw;
             }
         }
 
-        private List<ISnService> serviceInstances;
-
-        private static void InitializeDataProviderExtensions()
-        {
-            // set default value of well-known data provider extensions
-
-            if (DataProvider.GetExtension<IPackagingDataProviderExtension>() == null)
-                DataProvider.Instance.SetExtension(typeof(IPackagingDataProviderExtension), new SqlPackagingDataProvider());
-
-            if (DataProvider.GetExtension<IAccessTokenDataProviderExtension>() == null)
-                DataProvider.Instance.SetExtension(typeof(IAccessTokenDataProviderExtension), new SqlAccessTokenDataProvider());
-
-            if (DataProvider.GetExtension<ISharedLockDataProviderExtension>() == null)
-                DataProvider.Instance.SetExtension(typeof(ISharedLockDataProviderExtension), new SqlSharedLockDataProvider());
-        }
-
-        private static void InitializeOAuthProviders()
-        {
-            var providerTypeNames = new List<string>();
-
-            foreach (var providerType in TypeResolver.GetTypesByInterface(typeof(IOAuthProvider)).Where(t => !t.IsAbstract))
-            {
-                if (!(TypeResolver.CreateInstance(providerType.FullName) is IOAuthProvider provider))
-                    continue;
-
-                if (string.IsNullOrEmpty(provider.ProviderName))
-                {
-                    SnLog.WriteWarning($"OAuth provider type {providerType.FullName} does not expose a valid ProviderName value, therefore cannot be initialized.");
-                    continue;
-                }
-                if (string.IsNullOrEmpty(provider.IdentifierFieldName))
-                {
-                    SnLog.WriteWarning($"OAuth provider type {providerType.FullName} does not expose a valid IdentifierFieldName value, therefore cannot be initialized.");
-                    continue;
-                }
-
-                Providers.Instance.SetProvider(OAuthProviderTools.GetProviderRegistrationName(provider.ProviderName), provider);
-                providerTypeNames.Add($"{providerType.FullName} ({provider.ProviderName})");
-            }
-
-            if (providerTypeNames.Any())
-            {
-                SnLog.WriteInformation("OAuth providers registered: " + Environment.NewLine +
-                                       string.Join(Environment.NewLine, providerTypeNames));
-            }
-        }
+        private List<ISnService> _serviceInstances;
 
         private static void InitializeLogger()
         {
             // look for the configured logger
             SnLog.Instance = Providers.Instance.EventLogger ?? new DebugWriteLoggerAdapter();
-            SnLog.PropertyCollector = Providers.Instance.PropertyCollector ?? new EventPropertyCollector();
-            SnLog.AuditEventWriter = new DatabaseAuditEventWriter();
+            SnLog.AuditEventWriter = Providers.Instance.AuditEventWriter ?? throw new ApplicationException("Missing AuditEventWriter service.");
 
             //set configured tracers
-            var tracers = Providers.Instance.GetProvider<ISnTracer[]>();
-            if (tracers?.Length > 0)
+            var tracers = Providers.Instance.Services.GetServices<ISnTracer>().ToArray();
+            if (tracers.Length > 0)
             {
                 SnTrace.SnTracers.Clear();
                 SnTrace.SnTracers.AddRange(tracers);
             }
 
-            SnLog.WriteInformation("Loggers and tracers initialized.", properties: new Dictionary<string, object>
-            {
-                { "Loggers", SnLog.Instance?.GetType().Name },
-                { "Tracers", string.Join(", ", SnTrace.SnTracers.Select(snt => snt?.GetType().Name)) }
-            });
+            SnTrace.System.Write("Loggers and tracers initialized. " +
+                                     $"Loggers: {SnLog.Instance?.GetType().Name}. " +
+                                     $"Tracers: {string.Join(", ", SnTrace.SnTracers.Select(snt => snt?.GetType().Name))}");
         }
 
         private void RegisterAppdomainEventHandlers()
@@ -422,6 +380,8 @@ namespace SenseNet.ContentRepository
         {
             if (_instance == null)
             {
+                _started = false;
+
                 SnLog.WriteWarning("Repository shutdown has already completed.");
                 return;
             }
@@ -430,62 +390,69 @@ namespace SenseNet.ContentRepository
             {
                 if (_instance == null)
                 {
+                    _started = false;
+
                     SnLog.WriteWarning("Repository shutdown has already completed.");
                     return;
                 }
 
                 SnTrace.Repository.Write("Sending a goodbye message.");
 
-                _instance.ConsoleWriteLine();
+                _instance.ConsoleWriteLine(false);
 
-                _instance.ConsoleWriteLine("Sending a goodbye message...");
-                DistributedApplication.ClusterChannel.ClusterMemberInfo.NeedToRecover = false;
+                _instance.ConsoleWriteLine(true, "Sending a goodbye message.");
+                var channel = Providers.Instance.ClusterChannelProvider;
+                channel.ClusterMemberInfo.NeedToRecover = false;
                 var pingMessage = new PingMessage();
-                pingMessage.Send();
+                pingMessage.SendAsync(CancellationToken.None).GetAwaiter().GetResult();
 
-                foreach (var svc in _instance.serviceInstances)
+                foreach (var svc in _instance._serviceInstances)
                 {
                     SnTrace.Repository.Write("Shutting down {0}", svc.GetType().Name);
                     svc.Shutdown();
                 }
 
-                SnTrace.Repository.Write("Shutting down {0}", DistributedApplication.ClusterChannel.GetType().Name);
-                DistributedApplication.ClusterChannel.ShutDown();
+                SnTrace.Repository.Write("Shutting down {0}", channel.GetType().Name);
+                channel.ShutDownAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                 SnTrace.Repository.Write("Shutting down Security.");
-                SecurityHandler.ShutDownSecurity();
+                Providers.Instance.SecurityHandler.ShutDownSecurity();
 
                 SnTrace.Repository.Write("Shutting down IndexingEngine.");
-                IndexManager.ShutDown();
+                Providers.Instance.IndexManager.ShutDown();
 
                 ContextHandler.Reset();
 
                 var t = DateTime.UtcNow - _instance._startupInfo.Starting;
                 var msg = $"Repository has stopped. Running time: {t.Days}.{t.Hours:d2}:{t.Minutes:d2}:{t.Seconds:d2}";
 
-                SnTrace.Repository.Write(msg);
+                if (_instance._logger != null)
+                    _instance._logger.LogInformation(msg);
+                else
+                    SnTrace.Repository.Write(msg);
+
                 SnTrace.Flush();
 
-                _instance.ConsoleWriteLine(msg);
-                _instance.ConsoleWriteLine();
-                SnLog.WriteInformation(msg);
+                _instance.ConsoleWriteLine(false, msg);
+                _instance.ConsoleWriteLine(false);
 
                 _instance = null;
                 _started = false;
             }
         }
 
-        public void ConsoleWrite(params string[] text)
+        public void ConsoleWrite(bool trace, params string[] text)
         {
             foreach (var s in text)
             {
-                SnTrace.System.Write(s);
+                if(trace)
+                    SnTrace.System.Write(s);
                 _settings.Console?.Write(s);
             }
         }
-        public void ConsoleWriteLine(params string[] text)
+        public void ConsoleWriteLine(bool trace, params string[] text)
         {
-            ConsoleWrite(text);
+            ConsoleWrite(trace, text);
             _settings.Console?.WriteLine();
         }
 
@@ -502,11 +469,9 @@ namespace SenseNet.ContentRepository
             {
                 if (_instance == null)
                     throw new NotSupportedException("Querying running state of IndexingEngine is not supported when RepositoryInstance is not created.");
-                return IndexManager.Running;
+                return Providers.Instance.IndexManager.Running;
             }
         }
-        [Obsolete("Use SearchManager.ContentQueryIsAllowed instead.")]
-        public static bool ContentQueryIsAllowed => SearchManager.ContentQueryIsAllowed;
 
         // ======================================== IDisposable
         private bool _disposed;

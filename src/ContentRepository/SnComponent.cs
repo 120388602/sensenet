@@ -1,5 +1,5 @@
 ﻿using System;
-using SenseNet.ContentRepository.Storage;
+using SenseNet.Packaging;
 
 namespace SenseNet.ContentRepository
 {
@@ -18,6 +18,12 @@ namespace SenseNet.ContentRepository
         public virtual bool IsComponentAllowed(Version componentVersion)
         {
             return true;
+        }
+
+        /// <inheritdoc />
+        public virtual void AddPatches(PatchBuilder builder)
+        {
+            // do nothing
         }
     }
 }

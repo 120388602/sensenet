@@ -2,11 +2,13 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using SenseNet.ContentRepository.Schema;
 using SenseNet.ContentRepository;
 using SenseNet.Diagnostics;
 using SenseNet.Search;
 using SenseNet.ContentRepository.Storage;
+using Task = System.Threading.Tasks.Task;
 
 namespace SenseNet.ApplicationModel
 {
@@ -47,19 +49,36 @@ namespace SenseNet.ApplicationModel
             return false;
         }
 
+        [Obsolete("Use async version instead.", true)]
         public override void Save(NodeSaveSettings settings)
         {
-            base.Save(settings);
+            SaveAsync(settings, CancellationToken.None).GetAwaiter().GetResult();
+        }
+        public override async Task SaveAsync(NodeSaveSettings settings, CancellationToken cancel)
+        {
+            await base.SaveAsync(settings, cancel).ConfigureAwait(false);
             DeviceManager.Reset();
         }
+
+        [Obsolete("Use async version instead", true)]
         public override void Delete(bool bypassTrash)
         {
-            base.Delete(bypassTrash);
+            DeleteAsync(bypassTrash, CancellationToken.None).GetAwaiter().GetResult();
+        }
+        public override async Task DeleteAsync(bool bypassTrash, CancellationToken cancel)
+        {
+            await base.DeleteAsync(bypassTrash, cancel);
             DeviceManager.Reset();
         }
+
+        [Obsolete("Use async version instead", true)]
         public override void ForceDelete()
         {
-            base.ForceDelete();
+            ForceDeleteAsync(CancellationToken.None).ConfigureAwait(false).GetAwaiter().GetResult();
+        }
+        public override async Task ForceDeleteAsync(CancellationToken cancel)
+        {
+            await base.ForceDeleteAsync(cancel);
             DeviceManager.Reset();
         }
 

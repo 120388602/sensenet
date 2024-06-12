@@ -2,12 +2,14 @@
 using System.Linq;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using System.Globalization;
+using System.Threading;
 using SenseNet.Configuration;
 using SenseNet.ContentRepository.Storage.Security;
 using SenseNet.Search;
 using SenseNet.ContentRepository.Search;
-using SenseNet.Tests;
-using SenseNet.Tests.Implementations;
+using SenseNet.ContentRepository.InMemory;
+using SenseNet.Extensions.DependencyInjection;
+using SenseNet.Tests.Core;
 
 namespace SenseNet.ContentRepository.Tests
 {
@@ -171,18 +173,19 @@ namespace SenseNet.ContentRepository.Tests
                 () =>
                 {
                     AddRootAccessibilityToAdmin();
+                    var currentUser = User.Visitor;
+                    using(new SystemAccount())
+                        currentUser.CreationDate = new DateTime(2001, 01, 02);
+                    User.Current = currentUser;
 
-                    var node = Repository.Root;
-
-                    //var date1 = ((User)User.Current).CreationDate;
-                    var date1 = node.CreationDate;
+                    var date1 = ((User)User.Current).CreationDate;
+                    var date2 = currentUser.Owner.CreationDate; // Visitor does not see the admin
 
                     AssertDate("@@CurrentUser.CreationDate@@", date1, "CU.CreationDate is incorrect.");
                     AssertDate("@@CurrentUser.CreationDate+3minutes@@", date1.AddMinutes(3), "CU.CreationDate is incorrect.");
 
-                    date1 = node.Owner.CreationDate;
-                    AssertDate("@@CurrentUser.Owner.CreationDate@@", date1, "CU.Owner.CreationDate is incorrect.");
-                    AssertDate("@@CurrentUser.Owner.CreationDate-3days@@", date1.AddDays(-3), "CU.Owner.CreationDate is incorrect.");
+                    AssertDate("@@CurrentUser.Owner.CreationDate@@", date2, "CU.Owner.CreationDate is incorrect.");
+                    AssertDate("@@CurrentUser.Owner.CreationDate-3days@@", date2.AddDays(-3), "CU.Owner.CreationDate is incorrect.");
 
                     var index = ((User)User.Current).Index;
                     Assert.AreEqual(index.ToString(), TemplateManager.Replace(typeof(ContentQueryTemplateReplacer), "@@CurrentUser.Index@@"), "Index is incorrect.");
@@ -191,10 +194,9 @@ namespace SenseNet.ContentRepository.Tests
 
                     // method syntax------------------------------------------------------------
 
-                    date1 = node.Owner.CreationDate;
-                    AssertDate("@@CurrentUser.Owner.CreationDate.AddMonths(3)@@", date1.AddMonths(3), "CU.Owner.AddMonths is incorrect.");
-                    AssertDate("@@CurrentUser.Owner.CreationDate.SubtractDays(3)@@", date1.AddDays(-3), "CU.Owner.CreationDate.SubtractDays is incorrect.");
-                    AssertDate("@@CurrentUser.Owner.CreationDate.AddDays(-3)@@", date1.AddDays(-3), "CU.Owner.CreationDate.AddDays(-) is incorrect.");
+                    AssertDate("@@CurrentUser.Owner.CreationDate.AddMonths(3)@@", date2.AddMonths(3), "CU.Owner.AddMonths is incorrect.");
+                    AssertDate("@@CurrentUser.Owner.CreationDate.SubtractDays(3)@@", date2.AddDays(-3), "CU.Owner.CreationDate.SubtractDays is incorrect.");
+                    AssertDate("@@CurrentUser.Owner.CreationDate.AddDays(-3)@@", date2.AddDays(-3), "CU.Owner.CreationDate.AddDays(-) is incorrect.");
                 });
         }
 
@@ -207,7 +209,7 @@ namespace SenseNet.ContentRepository.Tests
                 () =>
                 {
                     AddRootAccessibilityToAdmin();
-                    var queryEngine = (InMemoryQueryEngine)SearchManager.SearchEngine.QueryEngine;
+                    var queryEngine = (InMemoryQueryEngine)Providers.Instance.SearchManager.SearchEngine.QueryEngine;
 
                     queryEngine.ClearLog();
                     var expected = $"ExecuteQuery: Id:{User.Current.Id} .AUTOFILTERS:OFF";
@@ -227,7 +229,7 @@ namespace SenseNet.ContentRepository.Tests
                 () =>
                 {
                     AddRootAccessibilityToAdmin();
-                    var queryEngine = (InMemoryQueryEngine)SearchManager.SearchEngine.QueryEngine;
+                    var queryEngine = (InMemoryQueryEngine)Providers.Instance.SearchManager.SearchEngine.QueryEngine;
 
                     queryEngine.ClearLog();
                     var expected = $"ExecuteQueryAndProject: Id:{User.Current.Id} .AUTOFILTERS:OFF";
@@ -245,10 +247,10 @@ namespace SenseNet.ContentRepository.Tests
         {
             using (new SystemAccount())
             {
-                SecurityHandler.CreateAclEditor()
+                Providers.Instance.SecurityHandler.CreateAclEditor()
                     // ReSharper disable once CoVariantArrayConversion
                    .Allow(Identifiers.PortalRootId, User.Administrator.Id, false, PermissionType.PermissionTypes)
-                   .Apply();
+                    .ApplyAsync(CancellationToken.None).GetAwaiter().GetResult();
                 User.Administrator.CreationDate = new DateTime(2001, 01, 01);
             }
         }

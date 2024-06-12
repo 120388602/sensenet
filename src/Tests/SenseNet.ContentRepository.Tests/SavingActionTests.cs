@@ -6,7 +6,7 @@ using Microsoft.VisualStudio.TestTools.UnitTesting;
 using SenseNet.Configuration;
 using SenseNet.ContentRepository.Storage;
 using SenseNet.ContentRepository.Versioning;
-using SenseNet.Tests;
+using SenseNet.Tests.Core;
 
 namespace SenseNet.ContentRepository.Tests
 {
@@ -888,7 +888,7 @@ namespace SenseNet.ContentRepository.Tests
             var lastMajorVer = versionHistory.Where(v => v.VersionNumber.Minor == 0 && v.VersionNumber.Status == VersionStatus.Approved).LastOrDefault();
             var lastMinorVer = versionHistory.LastOrDefault();
 
-            var head = NodeHead.CreateFromNode(node, lastMinorVer.VersionId, lastMajorVer == null ? 0 : lastMajorVer.VersionId);
+            var head = NodeHead.CreateFromNode(node.Data, lastMinorVer.VersionId, lastMajorVer == null ? 0 : lastMajorVer.VersionId);
             var fieldInfo = head.GetType().GetField("_versions", BindingFlags.NonPublic | BindingFlags.Instance);
             fieldInfo.SetValue(head, versionHistory);
 

@@ -1,13 +1,17 @@
-﻿using System.IO;
+﻿using System;
+using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Web;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using SenseNet.Configuration;
 using SenseNet.ContentRepository.Storage;
+using SenseNet.ContentRepository.Storage.Caching;
 using SenseNet.ContentRepository.Storage.Security;
 using SenseNet.Portal.Virtualization;
 using SenseNet.Security;
-using SenseNet.Tests;
+using SenseNet.Tests.Core;
 // ReSharper disable UnusedVariable
 
 namespace SenseNet.ContentRepository.Tests
@@ -15,76 +19,332 @@ namespace SenseNet.ContentRepository.Tests
     [TestClass]
     public class UserTests : TestBase
     {
-        private class TestMembershipExtender : MembershipExtenderBase
-        {
-            public override MembershipExtension GetExtension(IUser user)
-            {
-                if (!(user is User userContent))
-                    return EmptyExtension;
-                if (userContent.DisplayName != "User_sensenet393_BugReproduction")
-                    return EmptyExtension;
+        //TODO: Rewrite this class when a MembershipExtender alternative is developing.
+        //private class TestMembershipExtender : MembershipExtenderBase
+        //{
+        //    public override MembershipExtension GetExtension(IUser user)
+        //    {
+        //        if (!(user is User userContent))
+        //            return EmptyExtension;
+        //        if (userContent.DisplayName != "User_sensenet393_BugReproduction")
+        //            return EmptyExtension;
 
-                // this line can cause infinite recursion.
-                var requestedNode = PortalContext.Current.ContextNode;
+        //        // this line can cause infinite recursion.
+        //        var requestedNode = PortalContext.Current.ContextNode;
 
-                var groupIds = ((User) requestedNode).GetDynamicGroups(2);
+        //        var groupIds = ((User) requestedNode).GetDynamicGroups(2);
 
-                var testGroup = (IGroup)Node.LoadNode("/Root/IMS/BuiltIn/Portal/TestGroup");
-                return new MembershipExtension(new []{ testGroup });
-            }
-        }
+        //        var testGroup = (IGroup)Node.LoadNode("/Root/IMS/BuiltIn/Portal/TestGroup");
+        //        return new MembershipExtension(new []{ testGroup });
+        //    }
+        //}
+
+        //TODO: Rewrite this test when a MembershipExtender alternative is developing.
+        //[TestMethod]
+        //public void User_sensenet393_BugReproduction()
+        //{
+        //    Test(true, () =>
+        //    {
+        //        Providers.Instance.CacheProvider = new SnMemoryCache();
+
+        //        Group group;
+        //        User user;
+        //        using (new SystemAccount())
+        //        {
+        //            var ed = SecurityHandler.CreateAclEditor();
+        //            ed.Set(Repository.Root.Id, User.Administrator.Id, false, PermissionBitMask.AllAllowed);
+        //            ed.Set(Repository.Root.Id, Group.Administrators.Id, false, PermissionBitMask.AllAllowed);
+        //            ed.Apply();
+
+        //            var portal = Node.LoadNode("/Root/IMS/BuiltIn/Portal");
+
+        //            group = new Group(portal)
+        //            {
+        //                Name = "TestGroup"
+        //            };
+        //            group.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
+
+        //            user = new User(portal)
+        //            {
+        //                Name = "TestUser",
+        //                Enabled = true,
+        //                Email = "mail@example.com",
+        //                DisplayName = "User_sensenet393_BugReproduction"
+        //            };
+        //            user.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
+
+        //            Group.Administrators.AddMember(user);
+        //            User.Current = user;
+        //        }
+
+        //        Providers.Instance.MembershipExtender = new TestMembershipExtender();
+
+        //        var simulatedOutput = new StringWriter();
+        //        var simulatedWorkerRequest = new SimulatedHttpRequest(@"\", @"C:\Inetpub\wwwroot", user.Path, "",
+        //            simulatedOutput, "localhost_forms");
+        //        var simulatedHttpContext = new HttpContext(simulatedWorkerRequest);
+        //        var portalContext = PortalContext.Create(simulatedHttpContext);
+        //        HttpContext.Current = simulatedHttpContext;
+
+        //        // This line caused StackOverflowException
+        //        var additionalGroups = user.GetDynamicGroups(2);
+
+        //        // The bug is fixed if the code can run up to this point
+        //        // but we test the full feature.
+        //        Assert.AreEqual(group.Id, additionalGroups.First());
+        //    });
+        //}
 
         [TestMethod]
-        public void User_sensenet393_BugReproduction()
+        public void User_CreateByRegularUser()
         {
             Test(true, () =>
             {
-                Group group;
-                User user;
-                using (new SystemAccount())
+                var parentPath = "/Root/IMS/BuiltIn/Temp-" + Guid.NewGuid();
+                var originalUser = AccessProvider.Current.GetOriginalUser();
+
+                try
                 {
-                    var ed = SecurityHandler.CreateAclEditor();
-                    ed.Set(Repository.Root.Id, User.Administrator.Id, false, PermissionBitMask.AllAllowed);
-                    ed.Set(Repository.Root.Id, Group.Administrators.Id, false, PermissionBitMask.AllAllowed);
-                    ed.Apply();
+                    User user1;
+                    Content parent;
 
-                    var portal = Node.LoadNode("/Root/IMS/BuiltIn/Portal");
-
-                    group = new Group(portal)
+                    using (new SystemAccount())
                     {
-                        Name = "TestGroup"
-                    };
-                    group.Save();
+                        // create a test container
+                        parent = RepositoryTools.CreateStructure(parentPath, "OrganizationalUnit");
 
-                    user = new User(portal)
+                        // create a test user
+                        user1 = new User(parent.ContentHandler)
+                        {
+                            Name = "sample-sam",
+                            LoginName = "samplesam@example.com",
+                            Email = "samplesam@example.com"
+                        };
+                        user1.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
+
+                        // add permissions for this test user (local Add, but not TakeOwnership) and for Owners (everything)
+                        var editor = Providers.Instance.SecurityHandler.SecurityContext.CreateAclEditor();
+                        editor
+                            .Allow(parent.Id, user1.Id, true, PermissionType.AddNew)
+                            .Allow(parent.Id, Identifiers.OwnersGroupId, false, PermissionType.BuiltInPermissionTypes)
+                            // technical permission for content types
+                            .Allow(Identifiers.PortalRootId, user1.Id, false, PermissionType.See);
+                        editor.ApplyAsync(CancellationToken.None).GetAwaiter().GetResult();
+                    }
+
+                    AccessProvider.Current.SetCurrentUser(user1);
+
+                    // create a new user in the name of the test user
+                    var user2 = new User(parent.ContentHandler)
                     {
-                        Name = "TestUser",
-                        Enabled = true,
-                        Email = "mail@example.com",
-                        DisplayName = "User_sensenet393_BugReproduction"
+                        Name = "newser",
+                        LoginName = "newser@example.com",
+                        Email = "newser@example.com"
                     };
-                    user.Save();
 
-                    Group.Administrators.AddMember(user);
-                    User.Current = user;
+                    //ACTION
+                    user2.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
+
+                    using (new SystemAccount())
+                    {
+                        // user1 could create user2, but cannot open or modify it, because he only has AddNew permission on the parent
+                        Assert.IsFalse(user2.Security.HasPermission(user1, PermissionType.Open));
+
+                        // the new user should have permissions for herself because she is the owner
+                        Assert.IsTrue(user2.Security.HasPermission(user2, PermissionType.Save));
+                    }
                 }
+                finally
+                {
+                    AccessProvider.Current.SetCurrentUser(originalUser);
 
-                Providers.Instance.MembershipExtender = new TestMembershipExtender();
-
-                var simulatedOutput = new StringWriter();
-                var simulatedWorkerRequest = new SimulatedHttpRequest(@"\", @"C:\Inetpub\wwwroot", user.Path, "",
-                    simulatedOutput, "localhost_forms");
-                var simulatedHttpContext = new HttpContext(simulatedWorkerRequest);
-                var portalContext = PortalContext.Create(simulatedHttpContext);
-                HttpContext.Current = simulatedHttpContext;
-
-                // This line caused StackOverflowException
-                var additionalGroups = user.GetDynamicGroups(2);
-
-                // The bug is fixed if the code can run up to this point
-                // but we test the full feature.
-                Assert.AreEqual(group.Id, additionalGroups.First());
+                    using (new SystemAccount())
+                        if (Node.Exists(parentPath))
+                            Node.ForceDeleteAsync(parentPath, CancellationToken.None).GetAwaiter().GetResult();
+                }
             });
+        }
+
+        [TestMethod]
+        public void User_Roles()
+        {
+            string GetNames(IEnumerable<Node> list)
+            {
+                return string.Join(", ", list.Select(x => x.Name));
+            }
+
+            Test(() =>
+            {
+                var adminContent = Content.Create(User.Administrator);
+                var allAdminRoles = adminContent["AllRoles"];
+                var directAdminRoles = adminContent["DirectRoles"];
+
+                var group1 = new Group(OrganizationalUnit.Portal) { Name = "Group-1" };
+                group1.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
+                var group2 = new Group(OrganizationalUnit.Portal) { Name = "Group-2" };
+                group2.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
+
+                // ACTION-1: Create user
+                var user = new User(OrganizationalUnit.Portal)
+                {
+                    Name = "User-1",
+                    Email = "user1@example.com",
+                    Enabled = true
+                };
+                user.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
+
+                // ASSERT-1: There are no known roles
+                var content = Content.Create(user);
+                var allRoles = GetNames((IEnumerable<Node>) content["AllRoles"]);
+                var directRoles = GetNames((IEnumerable<Node>)content["DirectRoles"]);
+                Assert.IsFalse(allRoles.Contains("Group-1"));
+                Assert.IsFalse(directRoles.Contains("Group-1"));
+                Assert.IsFalse(allRoles.Contains("Group-2"));
+                Assert.IsFalse(directRoles.Contains("Group-2"));
+
+                // ACTION-2: Set direct member
+                group1.AddMember(user);
+
+                // ASSERT-2
+                content = Content.Create(user);
+                allRoles = GetNames((IEnumerable<Node>)content["AllRoles"]);
+                directRoles = GetNames((IEnumerable<Node>)content["DirectRoles"]);
+                Assert.IsTrue(allRoles.Contains("Group-1"));
+                Assert.IsTrue(directRoles.Contains("Group-1"));
+                Assert.IsFalse(allRoles.Contains("Group-2"));
+                Assert.IsFalse(directRoles.Contains("Group-2"));
+
+                // ACTION-3: Set indirect member
+                group2.AddMember(group1);
+
+                // ASSERT-3:
+                content = Content.Create(user);
+                allRoles = GetNames((IEnumerable<Node>)content["AllRoles"]);
+                directRoles = GetNames((IEnumerable<Node>)content["DirectRoles"]);
+                Assert.IsTrue(allRoles.Contains("Group-1"));
+                Assert.IsTrue(directRoles.Contains("Group-1"));
+                Assert.IsTrue(allRoles.Contains("Group-2"));
+                Assert.IsFalse(directRoles.Contains("Group-2"));
+
+                // ACTION-4: Remove direct member
+                group1.RemoveMember(user);
+
+                // ASSERT-4
+                content = Content.Create(user);
+                allRoles = GetNames((IEnumerable<Node>)content["AllRoles"]);
+                directRoles = GetNames((IEnumerable<Node>)content["DirectRoles"]);
+                Assert.IsFalse(allRoles.Contains("Group-1"));
+                Assert.IsFalse(directRoles.Contains("Group-1"));
+                Assert.IsFalse(allRoles.Contains("Group-2"));
+                Assert.IsFalse(directRoles.Contains("Group-2"));
+
+            });
+        }
+
+        [TestMethod]
+        public void User_Roles_Inaccessible()
+        {
+            Test(() =>
+            {
+                var user1 = new User(OrganizationalUnit.Portal)
+                {
+                    Name = "User-1",
+                    Email = "user1@example.com",
+                    Enabled = true
+                };
+                user1.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
+
+                var group1 = new Group(OrganizationalUnit.Portal) { Name = "Group-1" };
+                group1.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
+                group1.AddMember(user1);
+
+                var allRolesWithAdmin = ((IEnumerable<Node>) Content.Create(user1)["AllRoles"]).ToArray();
+
+                Assert.IsNotNull(allRolesWithAdmin.Single(r => r.Name == "Portal"));
+                Assert.IsNotNull(allRolesWithAdmin.Single(r => r.Name == group1.Name));
+
+                var originalUser = AccessProvider.Current.GetOriginalUser();
+                try
+                {
+                    // switch to a user with few permissions
+                    AccessProvider.Current.SetCurrentUser(user1);
+
+                    var allRolesWithUser = ((IEnumerable<Node>)Content.Create(user1)["AllRoles"]).ToArray();
+
+                    // the user does not have permission for these roles, but the field does not throw an exception
+                    Assert.AreEqual(0, allRolesWithUser.Length);
+                }
+                finally
+                {
+                    AccessProvider.Current.SetCurrentUser(originalUser);
+                }
+            });
+        }
+
+        [TestMethod]
+        [ExpectedException(typeof(InvalidOperationException))]
+        public void User_Disable_Self()
+        {
+            Test(() =>
+            {
+                var user1 = new User(OrganizationalUnit.Portal)
+                {
+                    Name = "User-1",
+                    Email = "user1@example.com",
+                    Enabled = true
+                };
+                user1.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
+                
+                var originalUser = AccessProvider.Current.GetOriginalUser();
+
+                try
+                {
+                    // switch to a real user
+                    AccessProvider.Current.SetCurrentUser(user1);
+
+                    // try to disable themselves - it should throw an exception
+                    user1.Enabled = false;
+                    user1.SaveAsync(SavingMode.KeepVersion, CancellationToken.None).GetAwaiter().GetResult();
+                }
+                finally
+                {
+                    AccessProvider.Current.SetCurrentUser(originalUser);
+                }
+            });
+        }
+
+        private class TestPasswordSaltProvider : IPasswordSaltProvider
+        {
+            private readonly string _salt;
+            public TestPasswordSaltProvider(string salt) { _salt = salt; }
+            public string GetPasswordSalt() { return _salt; }
+        }
+        [TestMethod]
+        public void PasswordHash_Encode()
+        {
+            var hashes = new[]
+            {
+                PasswordHashProvider.EncodePassword("Password1", new TestPasswordSaltProvider("Salt1")),
+                PasswordHashProvider.EncodePassword("Password1", new TestPasswordSaltProvider("Salt2")),
+                PasswordHashProvider.EncodePassword("Password2", new TestPasswordSaltProvider("Salt1")),
+                PasswordHashProvider.EncodePassword("Password2", new TestPasswordSaltProvider("Salt2")),
+
+                PasswordHashProvider.EncodePassword("Password1", new TestPasswordSaltProvider("Salt1")),
+                PasswordHashProvider.EncodePassword("Password1", new TestPasswordSaltProvider("Salt2")),
+                PasswordHashProvider.EncodePassword("Password2", new TestPasswordSaltProvider("Salt1")),
+                PasswordHashProvider.EncodePassword("Password2", new TestPasswordSaltProvider("Salt2")),
+            };
+
+            Assert.AreNotEqual(hashes[0], hashes[1]); // same password, different salt
+            Assert.AreNotEqual(hashes[0], hashes[2]); // different password, same salt
+            Assert.AreNotEqual(hashes[0], hashes[3]); // different password, different salt
+            for (int i = 0; i < 4; i++)
+                Assert.AreNotEqual(hashes[i], hashes[i + 4]); // not equal even if created by same params.
+
+            Assert.IsTrue(PasswordHashProvider.CheckPassword("Password1", hashes[0], new TestPasswordSaltProvider("Salt1")));
+            Assert.IsTrue(PasswordHashProvider.CheckPassword("Password1", hashes[1], new TestPasswordSaltProvider("Salt2")));
+            Assert.IsTrue(PasswordHashProvider.CheckPassword("Password2", hashes[2], new TestPasswordSaltProvider("Salt1")));
+            Assert.IsTrue(PasswordHashProvider.CheckPassword("Password2", hashes[3], new TestPasswordSaltProvider("Salt2")));
         }
     }
 }

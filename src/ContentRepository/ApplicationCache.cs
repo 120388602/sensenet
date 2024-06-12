@@ -5,6 +5,8 @@ using System.Text;
 using SenseNet.ContentRepository.Storage.AppModel;
 using SenseNet.ContentRepository.Storage;
 using System.Reflection;
+using System.Threading;
+using SenseNet.Configuration;
 using SenseNet.ContentRepository.Storage.Search;
 using SenseNet.Diagnostics;
 using SenseNet.ContentRepository.Schema;
@@ -12,7 +14,7 @@ using SenseNet.ContentRepository.Search.Querying;
 
 namespace SenseNet.ContentRepository
 {
-    internal class ApplicationCache : IApplicationCache
+    public class ApplicationCache : IApplicationCache
     {
         // ========================================================== IApplicationCache Members
 
@@ -20,7 +22,7 @@ namespace SenseNet.ContentRepository
         {
             if (locked)
                 return empty;
-            if (ActiveSchema.NodeTypes["ApplicationCacheFile"] == null)
+            if (Providers.Instance.StorageSchema.NodeTypes["ApplicationCacheFile"] == null)
                 return empty;
 
             var file = LoadCacheFile(appTypeName);
@@ -37,7 +39,7 @@ namespace SenseNet.ContentRepository
             if (cacheFile != null)
             {
                 locked = true;
-                cacheFile.ForceDelete();
+                cacheFile.ForceDeleteAsync(CancellationToken.None).ConfigureAwait(false).GetAwaiter().GetResult();
                 locked = false;
             }
         }
@@ -72,7 +74,7 @@ namespace SenseNet.ContentRepository
             cacheFile.Name = appTypeName;
             cacheFile.Binary.SetStream(RepositoryTools.GetStreamFromString(BuildCacheData(appTypeName)));
             cacheFile.Binary.FileName = "AppCacheFile";
-            cacheFile.Save();
+            cacheFile.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
             cacheFile = Node.Load<ApplicationCacheFile>(cacheFile.Id);
             return cacheFile;
         }
@@ -83,7 +85,7 @@ namespace SenseNet.ContentRepository
                 return node;
             var folder = new SystemFolder(Repository.SystemFolder);
             folder.Name = PersistentAppCacheFolderName;
-            folder.Save();
+            folder.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
             return folder;
         }
         private string BuildCacheData(string appTypeName)
@@ -95,7 +97,8 @@ namespace SenseNet.ContentRepository
         }
         private List<string> SearchData(string appTypeName)
         {
-            var result = NodeQuery.QueryNodesByTypeAndPathAndName(ActiveSchema.NodeTypes["Folder"], false, null, false, appTypeName);
+            var result = NodeQuery.QueryNodesByTypeAndPathAndName(Providers.Instance.StorageSchema.NodeTypes["Folder"],
+                false, null, false, appTypeName);
 
             var data = new List<string>();
             foreach (var node in result.Nodes)

@@ -1,9 +1,5 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-// ReSharper disable InconsistentNaming
+﻿// ReSharper disable InconsistentNaming
+// ReSharper disable CheckNamespace
 
 namespace SenseNet.ContentRepository.Common
 {
@@ -13,7 +9,7 @@ namespace SenseNet.ContentRepository.Common
         {
             public static class General
             {
-                internal static string Msg_ParamtereIsNotABinaryFileName = "The type of paramter value must be a BinaryFileName";
+                internal static string Msg_ParamtereIsNotABinaryFileName = "The type of parameter value must be a BinaryFileName";
             }
         }
     }

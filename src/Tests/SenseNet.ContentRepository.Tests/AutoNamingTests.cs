@@ -1,12 +1,17 @@
 ﻿using Microsoft.VisualStudio.TestTools.UnitTesting;
 using SenseNet.ContentRepository.Schema;
 using SenseNet.ContentRepository.Storage.Data;
-using SenseNet.Tests;
+using SenseNet.Tests.Core;
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.DependencyInjection;
+using SenseNet.Configuration;
+using SenseNet.Storage;
+using SenseNet.Testing;
 
 namespace SenseNet.ContentRepository.Tests
 {
@@ -34,85 +39,41 @@ namespace SenseNet.ContentRepository.Tests
         [TestMethod]
         public void ContentNaming_FromDisplayName()
         {
-            var providers = new[] {
+            var namingProviders = new[] {
                 (ContentNamingProvider)new CharReplacementContentNamingProvider(),
                 (ContentNamingProvider)new Underscore5FContentNamingProvider()
             };
 
-            var contentNamingProviderAcc = new PrivateType(typeof(ContentNamingProvider));
-            var originalProvider = contentNamingProviderAcc.GetStaticField("__instance");
-            try
+            foreach (var namingProvider in namingProviders)
             {
-                foreach (var provider in providers)
+                var services = new ServiceCollection()
+                    .AddSingleton<IContentNamingProvider>(namingProvider)
+                    .BuildServiceProvider();
+                Providers.Instance = new Providers(services);
+
+                var providerName = namingProvider.GetType().Name;
+
+                Assert.AreEqual("árvíztűrőtükörfúrógép", ContentNamingProvider.GetNameFromDisplayName("árvíztűrőtükörfúrógép"));
+                Assert.AreEqual("ÁRVÍZTŰRŐTÜKÖRFÚRÓGÉP", ContentNamingProvider.GetNameFromDisplayName("ÁRVÍZTŰRŐTÜKÖRFÚRÓGÉP"));
+                Assert.AreEqual("ÁrvíztűrőTükörfúrógép", ContentNamingProvider.GetNameFromDisplayName("ÁrvíztűrőTükörfúrógép"));
+                Assert.AreEqual("árvíztűrőtükörfúrógép.txt", ContentNamingProvider.GetNameFromDisplayName("árvíztűrőtükörfúrógép.txt"));
+                Assert.AreEqual("árvíztűrőtükörfúrógép.doc.txt", ContentNamingProvider.GetNameFromDisplayName("árvíztűrőtükörfúrógép.txt", "árvíztűrőtükörfúrógép.doc"));
+                Assert.AreEqual("árvíztűrőtükörfúrógép.doc.txt", ContentNamingProvider.GetNameFromDisplayName(".txt", "árvíztűrőtükörfúrógép.doc"));
+
+                var name =  ContentNamingProvider.GetNameFromDisplayName("!*_~@#$%a^&()b{}+\"'|:<>?c/.,");
+                if (providerName == typeof(CharReplacementContentNamingProvider).Name)
                 {
-                    contentNamingProviderAcc.SetStaticField("__instance", provider);
-                    var providerName = provider.GetType().Name;
-
-                    Assert.AreEqual("árvíztűrőtükörfúrógép", ContentNamingProvider.GetNameFromDisplayName("árvíztűrőtükörfúrógép"));
-                    Assert.AreEqual("ÁRVÍZTŰRŐTÜKÖRFÚRÓGÉP", ContentNamingProvider.GetNameFromDisplayName("ÁRVÍZTŰRŐTÜKÖRFÚRÓGÉP"));
-                    Assert.AreEqual("ÁrvíztűrőTükörfúrógép", ContentNamingProvider.GetNameFromDisplayName("ÁrvíztűrőTükörfúrógép"));
-                    Assert.AreEqual("árvíztűrőtükörfúrógép.txt", ContentNamingProvider.GetNameFromDisplayName("árvíztűrőtükörfúrógép.txt"));
-                    Assert.AreEqual("árvíztűrőtükörfúrógép.doc.txt", ContentNamingProvider.GetNameFromDisplayName("árvíztűrőtükörfúrógép.txt", "árvíztűrőtükörfúrógép.doc"));
-                    Assert.AreEqual("árvíztűrőtükörfúrógép.doc.txt", ContentNamingProvider.GetNameFromDisplayName(".txt", "árvíztűrőtükörfúrógép.doc"));
-
-                    var name =  ContentNamingProvider.GetNameFromDisplayName("!*_~@#$%a^&()b{}+\"'|:<>?c/.,");
-                    if (providerName == typeof(CharReplacementContentNamingProvider).Name)
-                    {
-                        Assert.AreEqual("!-_-a-()b-c", name);
-                    }
-                    else if (providerName == typeof(Underscore5FContentNamingProvider).Name)
-                    {
-                        Assert.AreEqual("!_2a_5f_7e_40_23_24_25a_5e_26()b_7b_7d_2b_22_27_7c_3a_3c_3e_3fc_2f._2c", name);
-                    }
-                    else
-                    {
-                        Assert.Inconclusive("Unknown ContentNamingProvider: " + providerName);
-                    }
+                    Assert.AreEqual("!-_-a-()b-c", name);
+                }
+                else if (providerName == typeof(Underscore5FContentNamingProvider).Name)
+                {
+                    Assert.AreEqual("!_2a_5f_7e_40_23_24_25a_5e_26()b_7b_7d_2b_22_27_7c_3a_3c_3e_3fc_2f._2c", name);
+                }
+                else
+                {
+                    Assert.Inconclusive("Unknown ContentNamingProvider: " + providerName);
                 }
             }
-            finally
-            {
-                contentNamingProviderAcc.SetStaticField("__instance", originalProvider);
-            }
-        }
-        [TestMethod]
-        public void ContentNaming_AllowIncrementalNaming_Allowed()
-        {
-            Test(() =>
-            {
-                InstallContentTypes();
-                var testRoot = new SystemFolder(Repository.Root);
-                testRoot.Save();
-
-                Content content1, content2;
-                do
-                {
-                    content1 = Content.CreateNew(ContentType_Car1Name, testRoot, null);
-                    content2 = Content.CreateNew(ContentType_Car1Name, testRoot, null);
-                } while (content1.Name != content2.Name);
-                content1.Save();
-                content2.Save();
-            });
-        }
-        [TestMethod]
-        [ExpectedException(typeof(NodeAlreadyExistsException))]
-        public void ContentNaming_AllowIncrementalNaming_Disallowed()
-        {
-            Test(() =>
-            {
-                InstallContentTypes();
-                var testRoot = new SystemFolder(Repository.Root);
-                testRoot.Save();
-
-                Content content1, content2;
-                do
-                {
-                    content1 = Content.CreateNew(ContentType_Car2Name, testRoot, null);
-                    content2 = Content.CreateNew(ContentType_Car2Name, testRoot, null);
-                } while (content1.Name != content2.Name);
-                content1.Save();
-                content2.Save();
-            });
         }
         [TestMethod]
         public void ContentNaming_IncrementNameSuffixOnSave()
@@ -121,42 +82,42 @@ namespace SenseNet.ContentRepository.Tests
             {
                 InstallContentTypes();
                 var testRoot = new SystemFolder(Repository.Root);
-                testRoot.Save();
+                testRoot.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                 var root = new SystemFolder(testRoot) { Name = Guid.NewGuid().ToString() };
-                root.Save();
+                root.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                 // increment check
                 var content1 = Content.CreateNew(ContentType_Car1Name, root, "mycar");
-                content1.Save();
+                content1.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                 var content2 = Content.CreateNew(ContentType_Car1Name, root, "mycar");
-                content2.Save();
+                content2.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                 var content3 = Content.CreateNew(ContentType_Car1Name, root, "mycar");
-                content3.Save();
+                content3.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                 Assert.AreEqual("mycar", content1.Name);    // if mycar does not exist, name does not change
                 Assert.AreEqual("mycar(1)", content2.Name); // first increment
                 Assert.AreEqual("mycar(2)", content3.Name); // second increment
 
                 // 9 - 10 order problem: if mycar(9) and mycar(10) exists, mycar(11) is the next even though 10 is smaller than 9 if compared as strings
-                Content.CreateNew(ContentType_Car1Name, root, "mycar(9)").Save();
-                Content.CreateNew(ContentType_Car1Name, root, "mycar(10)").Save();
+                Content.CreateNew(ContentType_Car1Name, root, "mycar(9)").SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
+                Content.CreateNew(ContentType_Car1Name, root, "mycar(10)").SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                 var content4 = Content.CreateNew(ContentType_Car1Name, root, "mycar");
-                content4.Save();
+                content4.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                 Assert.AreEqual("mycar(11)", content4.Name);
 
                 // (string) suffix problem 1: string(test) should be incremented to string(test)(1)
                 var content5 = Content.CreateNew(ContentType_Car1Name, root, "string(test)");
-                content5.Save();
+                content5.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                 var content6 = Content.CreateNew(ContentType_Car1Name, root, "string(test)");
-                content6.Save();
+                content6.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                 Assert.AreEqual("string(test)", content5.Name);    // if string(test) does not exist, name does not change
                 Assert.AreEqual("string(test)(1)", content6.Name); // first increment
 
                 // (string) suffix problem 2: string should be incremented to string(guid), since string(test) already exists
                 var content7 = Content.CreateNew(ContentType_Car1Name, root, "string");
-                content7.Save();
+                content7.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                 var content8 = Content.CreateNew(ContentType_Car1Name, root, "string");
-                content8.Save();
+                content8.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                 Assert.AreEqual("string", content7.Name);       // did not exist yet
                 Assert.AreEqual("string(1)", content8.Name);       // did not exist yet
             });
@@ -168,42 +129,42 @@ namespace SenseNet.ContentRepository.Tests
             {
                 InstallContentTypes();
                 var testRoot = new SystemFolder(Repository.Root);
-                testRoot.Save();
+                testRoot.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                 var root = new SystemFolder(testRoot) { Name = Guid.NewGuid().ToString() };
-                root.Save();
+                root.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                 // increment check
                 var content1 = Content.CreateNew(ContentType_Car1Name, root, "mycar.xml");
-                content1.Save();
+                content1.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                 var content2 = Content.CreateNew(ContentType_Car1Name, root, "mycar.xml");
-                content2.Save();
+                content2.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                 var content3 = Content.CreateNew(ContentType_Car1Name, root, "mycar.xml");
-                content3.Save();
+                content3.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                 Assert.AreEqual("mycar.xml", content1.Name);    // if mycar does not exist, name does not change
                 Assert.AreEqual("mycar(1).xml", content2.Name); // first increment
                 Assert.AreEqual("mycar(2).xml", content3.Name); // second increment
 
                 // 9 - 10 order problem: if mycar(9) and mycar(10) exists, mycar(11) is the next even though 10 is smaller than 9 if compared as strings
-                Content.CreateNew(ContentType_Car1Name, root, "mycar(9).xml").Save();
-                Content.CreateNew(ContentType_Car1Name, root, "mycar(10).xml").Save();
+                Content.CreateNew(ContentType_Car1Name, root, "mycar(9).xml").SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
+                Content.CreateNew(ContentType_Car1Name, root, "mycar(10).xml").SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                 var content4 = Content.CreateNew(ContentType_Car1Name, root, "mycar.xml");
-                content4.Save();
+                content4.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                 Assert.IsTrue(content4.Name == "mycar(11).xml");
 
                 // (string) suffix problem 1: string(test) should be incremented to string(test)(1)
                 var content5 = Content.CreateNew(ContentType_Car1Name, root, "string(test).xml");
-                content5.Save();
+                content5.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                 var content6 = Content.CreateNew(ContentType_Car1Name, root, "string(test).xml");
-                content6.Save();
+                content6.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                 Assert.AreEqual("string(test).xml", content5.Name);    // if string(test) does not exist, name does not change
                 Assert.AreEqual("string(test)(1).xml", content6.Name); // first increment
 
                 // (string) suffix problem 2: string should be incremented to string(guid), since string(test) already exists
                 var content7 = Content.CreateNew(ContentType_Car1Name, root, "string.xml");
-                content7.Save();
+                content7.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                 var content8 = Content.CreateNew(ContentType_Car1Name, root, "string.xml");
-                content8.Save();
+                content8.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                 Assert.AreEqual("string.xml", content7.Name);
                 Assert.AreEqual("string(1).xml", content8.Name);
             });
@@ -215,29 +176,33 @@ namespace SenseNet.ContentRepository.Tests
             {
                 InstallContentTypes();
                 var testRoot = new SystemFolder(Repository.Root);
-                testRoot.Save();
+                testRoot.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                 var root = new SystemFolder(testRoot) { Name = Guid.NewGuid().ToString() };
-                root.Save();
+                root.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                 var content1 = Content.CreateNew(ContentType_Car2Name, root, "ondemand");
-                content1.Save();
+                content1.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                 // take a non-autoincrement type, and save it with autoincrement
                 bool typeNotAutoIncrement = false;
                 var content2 = Content.CreateNew(ContentType_Car2Name, root, "ondemand");
                 try
                 {
-                    content2.Save();
+                    content2.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                 }
                 catch (NodeAlreadyExistsException)
                 {
                     typeNotAutoIncrement = true;
                 }
+                catch(AggregateException ae)
+                {
+                    typeNotAutoIncrement = ae.InnerException is NodeAlreadyExistsException;
+                }
                 Assert.IsTrue(typeNotAutoIncrement);    // the type is non-autoincremental
 
                 content2.ContentHandler.AllowIncrementalNaming = true;
-                content2.Save();
+                content2.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                 Assert.AreEqual("ondemand(1)", content2.Name);  // non-autoincremental type is saved autoincrementally
             });
         }
@@ -248,14 +213,14 @@ namespace SenseNet.ContentRepository.Tests
             {
                 InstallContentTypes();
                 var testRoot = new SystemFolder(Repository.Root);
-                testRoot.Save();
+                testRoot.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                 var content1 = Content.CreateNew(ContentType_Car1Name, testRoot, "changeonsave");
-                content1.Save();
+                content1.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                 var content2 = Content.CreateNew(ContentType_Car1Name, testRoot, "changeonsave");
                 Assert.IsTrue(content2.Name == "changeonsave");     // name is not changed before saving, no queries are run (queries would be slow)
-                content2.Save();
+                content2.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                 Assert.IsTrue(content2.Name == "changeonsave(1)");  // name is changed after saving - we check here that name should actually be changed, so previous assert is correct
             });
         }

@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Web;
+using Microsoft.Extensions.DependencyInjection;
 using SenseNet.Configuration;
 using SenseNet.ContentRepository;
 using SenseNet.ContentRepository.Storage;
@@ -98,30 +99,41 @@ namespace SenseNet.ApplicationModel
             }
         }
 
-        public static ActionBase GetAction(string name, Content context, object parameters)
+        private static readonly IOperationMethodStorage DefaultOperationMethodStorage = new DefaultOperationMethodStorage();
+        internal static IOperationMethodStorage OperationMethodStorage =>
+            Providers.Instance.Services.GetService<IOperationMethodStorage>()
+            ?? DefaultOperationMethodStorage;
+
+        public static ActionBase GetAction(string name, Content context, object parameters,
+            Func<string, Content, object, ActionBase> getDefaultAction = null, object state = null)
         {
             if (context == null)
                 return null;
 
             var backUrl = CompatibilitySupport.Request_RawUrl;
 
-            return GetAction(name, context, backUrl, parameters);
+            return GetAction(name, context, backUrl, parameters, getDefaultAction, state);
         }
 
-        public static ActionBase GetAction(string name, Content context, string backUri, object parameters)
+        public static ActionBase GetAction(string name, Content context, string backUri, object parameters,
+            Func<string, Content, object, ActionBase> getDefaultAction = null, object state = null)
         {
             if (context == null)
                 return null;
 
             bool existingApplication;
             var app = ApplicationStorage.Instance.GetApplication(name, context, out existingApplication, GetDevice());
+            
+            if (app == null && existingApplication)
+                SnTrace.System.Write($"GetAction: app {name} exists but not available for " +
+                                     $"content {context.Path} and user {User.Current.Username}.");
 
             // if app is null, than create action in memory only if this is _not_ an existing application
             // (existing app can be null because of denied access or cleared/disabled status)
             // (we create Service and ClientAction types in memory this way - they do not exist in the tree)
             var action = app != null ? 
                 CreateActionWithPermissions(app, context, backUri, parameters) :
-                (existingApplication ? null : ActionFactory.CreateAction(name, context, backUri, parameters));
+                (existingApplication ? null : ActionFactory.CreateAction(name, context, backUri, parameters, getDefaultAction, state));
 
             return action;
         }
@@ -153,25 +165,29 @@ namespace SenseNet.ApplicationModel
             if (content == null)
                 return string.Empty;
 
-            var act = GetAction(actionName, content, back, null);
+            var act = GetAction(actionName, content, back, (string)null);
             
             return act == null ? string.Empty : act.Uri;
         }
 
-        public static IEnumerable<ActionBase> GetActions(Content context)
+        public static IEnumerable<ActionBase> GetActions(Content content, object state = null)
         {
-            return GetActions(context, default(string), null);
+            return GetActions(content, default(string), null, state);
         }
 
-        public static IEnumerable<ActionBase> GetActions(Content context, string scenario, string scenarioParameters)
+        public static IEnumerable<ActionBase> GetActions(Content content, string scenario, string scenarioParameters, object state = null)
         {
             // UrlEncode's parameter can be null
             var backUrl = HttpUtility.UrlEncode(CompatibilitySupport.Request_RawUrl);
 
-            return GetActions(context, scenario, scenarioParameters, backUrl);
+            return GetActions(content, scenario, scenarioParameters, backUrl, state);
         }
 
-        public static IEnumerable<ActionBase> GetActions(Content context, string scenario, string scenarioParameters, string backUri)
+        public static IEnumerable<ActionBase> GetActions(Content content, string scenario, string scenarioParameters, string backUri, object state = null)
+        {
+            return OperationMethodStorage.GetActions(GetStoredActions(content, scenario, scenarioParameters, backUri), content, scenario, state);
+        }
+        private static IEnumerable<ActionBase> GetStoredActions(Content content, string scenario, string scenarioParameters, string backUri)
         {
             if (!string.IsNullOrEmpty(scenario))
             {
@@ -179,10 +195,10 @@ namespace SenseNet.ApplicationModel
                 var sc = ScenarioManager.GetScenario(scenario, scenarioParameters);
                 if (sc != null)
                 {
-                    return sc.GetActions(context, backUri);
+                    return sc.GetActions(content, backUri);
                 }
             }
-            return GetActionsFromContentRepository(context, scenario, backUri);
+            return GetActionsFromContentRepository(content, scenario, backUri);
         }
 
         public static IEnumerable<ActionBase> GetActions(Content context, string[] scenarios, string backUri)
@@ -271,8 +287,8 @@ namespace SenseNet.ApplicationModel
                 return true;
 
             var perms = GetRequiredPermissions(app);
-            return perms.All(permType => SecurityHandler.HasPermission(contextHead, permType) &&
-                (!app.DeepPermissionCheck || SecurityHandler.HasSubTreePermission(contextHead, permType)));
+            return perms.All(permType => Providers.Instance.SecurityHandler.HasPermission(contextHead, permType) &&
+                                         (!app.DeepPermissionCheck || Providers.Instance.SecurityHandler.HasSubTreePermission(contextHead, permType)));
         }
 
         public static IEnumerable<PermissionType> GetRequiredPermissions(Application app)

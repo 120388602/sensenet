@@ -34,7 +34,7 @@ namespace SenseNet.Services.Wopi
             if (wd == null || !wd.Zones.Any())
                 throw new SnNotSupportedException("Office Online Server not found.");
 
-            //UNDONE: handle internal or external zone urls
+            //TODO: handle internal or external zone urls
             var wopiApp = wd.Zones["internal-https"]?.GetApp(content.Name, action);
             var wopiAction = wopiApp?.Actions.GetAction(action, content.Name);
             if (wopiAction == null)
@@ -103,6 +103,16 @@ namespace SenseNet.Services.Wopi
         private static readonly ConcurrentDictionary<string, Lazy<WopiDiscovery>> Instances =
             new ConcurrentDictionary<string, Lazy<WopiDiscovery>>();
 
+        /// <summary>
+        /// For tests.
+        /// </summary>
+        internal static void AddInstance(string url, WopiDiscovery discovery)
+        {
+            Instances.AddOrUpdate(url.TrimEnd('/'), 
+                oosUrl => new Lazy<WopiDiscovery>(() => discovery),
+                (oosUrl, current) => new Lazy<WopiDiscovery>(() => discovery));
+        }
+
         internal static WopiDiscovery GetInstance(string officeOnlineUrl)
         {
             return Instances.GetOrAdd(officeOnlineUrl.TrimEnd('/'), oosUrl => new Lazy<WopiDiscovery>(() =>
@@ -114,12 +124,18 @@ namespace SenseNet.Services.Wopi
                     using (var client = new HttpClient())
                     {
                         using (var discoveryStream = client.GetAsync($"{oosUrl}/hosting/discovery")
-                            .Result.Content.ReadAsStreamAsync().Result)
+                            .GetAwaiter().GetResult().Content.ReadAsStreamAsync().GetAwaiter().GetResult())
                         {
                             discoveryXml.Load(discoveryStream);
                         }
                     }
-                }, (i, ex) => ex == null || i > 3);
+                }, (i, ex) => 
+                {
+                    if (ex != null)
+                        SnLog.WriteException(ex, $"Error during Office Online Server {oosUrl} discovery.");
+
+                    return ex == null || i > 3; 
+                });
 
                 if (discoveryXml.DocumentElement == null)
                     SnLog.WriteWarning($"Could not connect to Office Online Server {oosUrl} for available actions.");

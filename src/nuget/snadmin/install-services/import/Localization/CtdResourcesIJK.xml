@@ -7,7 +7,13 @@
           <value>Image</value>
         </data>
         <data name="Description" xml:space="preserve">
-          <value>A special Document type for storing images.</value>
+          <value>A special file type for images.</value>
+        </data>
+        <data name="Name-DisplayName" xml:space="preserve">
+          <value>Name</value>
+        </data>
+         <data name="DisplayName-DisplayName" xml:space="preserve">
+          <value>Filename</value>
         </data>
         <data name="Keywords-DisplayName" xml:space="preserve">
           <value>Keywords</value>
@@ -33,7 +39,13 @@
           <value>Kép</value>
         </data>
         <data name="Description" xml:space="preserve">
-          <value>Speciális dokumentum típus képeknek.</value>
+          <value>Speciális fájl típus képek tárolásához.</value>
+        </data>
+        <data name="Name-DisplayName" xml:space="preserve">
+          <value>Név</value>
+        </data>
+        <data name="DisplayName-DisplayName" xml:space="preserve">
+          <value>Filenév</value>
         </data>
         <data name="Keywords-DisplayName" xml:space="preserve">
           <value>Kulcsszavak</value>
@@ -60,18 +72,30 @@
     <Languages>
       <Language cultureName="en">
         <data name="DisplayName" xml:space="preserve">
-          <value>Image library</value>
+          <value>Image Library</value>
         </data>
         <data name="Description" xml:space="preserve">
-          <value>A special List for storing images.</value>
+          <value>A container type for storing images.</value>
+        </data>
+         <data name="DisplayName-DisplayName" xml:space="preserve">
+          <value>Name</value>
+        </data>
+        <data name="DisplayName-Description" xml:space="preserve">
+          <value>Name of the Image Gallery</value>
         </data>
       </Language>
       <Language cultureName="hu">
         <data name="DisplayName" xml:space="preserve">
-          <value>Galéria</value>
+          <value>Képgaléria</value>
         </data>
         <data name="Description" xml:space="preserve">
-          <value>Speciális típus képek listázására.</value>
+          <value>Képek tárolására.</value>
+        </data>
+        <data name="DisplayName-DisplayName" xml:space="preserve">
+          <value>Név</value>
+        </data>
+        <data name="DisplayName-Description" xml:space="preserve">
+          <value>A képgaléria neve</value>
         </data>
       </Language>
     </Languages>
@@ -534,6 +558,20 @@
         </data>
         <data name="ItemListInheritableApprovingMode-Description" xml:space="preserve">
           <value>Adja meg, hogy az új vagy módosított tartalmakat a lista alatt jóvá kell-e hagyni, mielőtt megjelennek publikusan.</value>
+        </data>
+      </Language>
+    </Languages>
+  </ResourceClass>
+  <ResourceClass name="Ctd-IntegerFieldSetting">
+    <Languages>
+      <Language cultureName="en">
+        <data name="DisplayName" xml:space="preserve">
+          <value>Integer field</value>
+        </data>
+      </Language>
+      <Language cultureName="hu">
+        <data name="DisplayName" xml:space="preserve">
+          <value>Egész szám mező</value>
         </data>
       </Language>
     </Languages>

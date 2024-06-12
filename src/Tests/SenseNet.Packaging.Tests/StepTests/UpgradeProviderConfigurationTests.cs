@@ -1,11 +1,16 @@
 ﻿using System;
 using System.Text;
 using System.Xml;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
+using SenseNet.Configuration;
+using SenseNet.ContentRepository.InMemory;
+using SenseNet.ContentRepository.Storage.Data;
 using SenseNet.Packaging.Steps.Internal;
 using SenseNet.Packaging.Steps;
 using SenseNet.Packaging.Tests.Implementations;
-using SenseNet.Tests;
+using SenseNet.Testing;
+using SenseNet.Tests.Core;
 
 namespace SenseNet.Packaging.Tests.StepTests
 {
@@ -17,10 +22,15 @@ namespace SenseNet.Packaging.Tests.StepTests
         [TestInitialize]
         public void PrepareTest()
         {
+            Providers.Instance = new Providers(new ServiceCollection()
+                .AddSingleton<IPackagingDataProvider, InMemoryPackageStorageProvider>()
+                .AddSingleton<DataProvider, InMemoryDataProvider>()
+                .BuildServiceProvider());
+
             // preparing logger
             _log = new StringBuilder();
             var loggers = new[] { new PackagingTestLogger(_log) };
-            var loggerAcc = new PrivateType(typeof(Logger));
+            var loggerAcc = new TypeAccessor(typeof(Logger));
             loggerAcc.SetStaticField("_loggers", loggers);
         }
 
@@ -247,7 +257,7 @@ namespace SenseNet.Packaging.Tests.StepTests
 
             StepTest(config, expected, (step, configXml) =>
             {
-                new PrivateObject(step).Invoke("DeleteUnnecessareUnityElements", configXml);
+                new ObjectAccessor(step).Invoke("DeleteUnnecessareUnityElements", configXml);
             });
         }
         [TestMethod]
@@ -297,7 +307,7 @@ namespace SenseNet.Packaging.Tests.StepTests
 
             StepTest(config, expected, (step, configXml) =>
             {
-                new PrivateObject(step).Invoke("TransformProviderElements", configXml);
+                new ObjectAccessor(step).Invoke("TransformProviderElements", configXml);
             });
         }
         [TestMethod]
@@ -357,7 +367,7 @@ namespace SenseNet.Packaging.Tests.StepTests
 
             StepTest(config, expected, (step, configXml) =>
             {
-                new PrivateObject(step).Invoke("TransformProviderElements", configXml);
+                new ObjectAccessor(step).Invoke("TransformProviderElements", configXml);
             });
         }
         [TestMethod]
@@ -411,13 +421,13 @@ namespace SenseNet.Packaging.Tests.StepTests
 
             StepTest(config, expected, (step, configXml) =>
             {
-                new PrivateObject(step).Invoke("Execute", configXml);
+                new ObjectAccessor(step).Invoke("Execute", configXml);
             });
 
             Assert.IsTrue(_log.ToString().Contains("Unity section is totally removed."));
         }
-        [TestMethod]
-        public void Step_UpgradeProviderConfig_CleanupUnitySection_KeepProviders()
+        [TestMethod, TestCategory("Services")]
+        public void Step_UpgradeProviderConfig_CleanupUnitySection_KeepProviders_CSrv()
         {
             #region var config = ...
             var config = @"<?xml version='1.0' encoding='utf-8'?>
@@ -486,7 +496,7 @@ namespace SenseNet.Packaging.Tests.StepTests
 
             StepTest(config, expected, (step, configXml) =>
             {
-                new PrivateObject(step).Invoke("Execute", configXml);
+                new ObjectAccessor(step).Invoke("Execute", configXml);
             });
 
             Assert.IsTrue(_log.ToString().Contains("Providers container is not removed."));
@@ -559,7 +569,7 @@ namespace SenseNet.Packaging.Tests.StepTests
 
             StepTest(config, expected, (step, configXml) =>
             {
-                new PrivateObject(step).Invoke("Execute", configXml);
+                new ObjectAccessor(step).Invoke("Execute", configXml);
             });
 
             Assert.IsTrue(_log.ToString().Contains("Providers container is removed."));
@@ -748,7 +758,7 @@ namespace SenseNet.Packaging.Tests.StepTests
 
             StepTest(config, expected, (step, configXml) =>
             {
-                new PrivateObject(step).Invoke("Execute", configXml);
+                new ObjectAccessor(step).Invoke("Execute", configXml);
             });
         }
 

@@ -1,4 +1,6 @@
 ﻿using System;
+using System.Threading;
+using System.Threading.Tasks;
 using SenseNet.Communication.Messaging;
 using SenseNet.Configuration;
 using SenseNet.Diagnostics;
@@ -12,20 +14,30 @@ namespace SenseNet.ContentRepository.Storage.Caching.Dependency
     {
         #region private class FireChangedDistributedAction
         [Serializable]
-        private class FireChangedDistributedAction : DistributedAction
+        public class FireChangedDistributedAction : DistributedAction
         {
-            private readonly string _path;
+            public override string TraceMessage => $"PathDependency: {Path}";
+
+            private string _path;
+
+            public string Path
+            {
+                get => _path;
+                set => _path = value;
+            }
 
             public FireChangedDistributedAction(string path)
             {
                 _path = path;
             }
 
-            public override void DoAction(bool onRemote, bool isFromMe)
+            public override Task DoActionAsync(bool onRemote, bool isFromMe, CancellationToken cancellationToken)
             {
                 if (onRemote && isFromMe)
-                    return;
+                    return Task.CompletedTask;
                 FireChangedPrivate(_path);
+
+                return Task.CompletedTask;
             }
         }
         #endregion
@@ -40,7 +52,7 @@ namespace SenseNet.ContentRepository.Storage.Caching.Dependency
         /// </summary>
         public static void FireChanged(string path)
         {
-            new FireChangedDistributedAction(path).Execute();
+            new FireChangedDistributedAction(path).ExecuteAsync(CancellationToken.None).GetAwaiter().GetResult();
         }
         private static void FireChangedPrivate(string path)
         {

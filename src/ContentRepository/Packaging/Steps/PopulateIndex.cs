@@ -50,12 +50,12 @@ namespace SenseNet.Packaging.Steps
             }
 
             _context = context;
-            _versionCount = DataProvider.GetVersionCount(path);
+            _versionCount = Providers.Instance.DataStore.GetVersionCountAsync(path, CancellationToken.None).GetAwaiter().GetResult();
 
             var savedMode = RepositoryEnvironment.WorkingMode.Populating;
             RepositoryEnvironment.WorkingMode.Populating = true;
 
-            var populator = SearchManager.GetIndexPopulator();
+            var populator = Providers.Instance.SearchManager.GetIndexPopulator();
             populator.NodeIndexed += Populator_NodeIndexed;
             populator.IndexDocumentRefreshed += Populator_IndexDocumentRefreshed;
             populator.IndexingError += Populator_IndexingError;
@@ -71,14 +71,14 @@ namespace SenseNet.Packaging.Steps
                 if (string.IsNullOrEmpty(path) && rebuildLevel == IndexRebuildLevel.IndexOnly)
                 {
                     Logger.LogMessage($"Populating new index of the whole Content Repository...");
-                    populator.ClearAndPopulateAll(context.Console);
+                    populator.ClearAndPopulateAllAsync(CancellationToken.None, context.Console).GetAwaiter().GetResult();
                 }
                 else
                 {
                     if (string.IsNullOrEmpty(path))
                         path = Identifiers.RootPath;
                     Logger.LogMessage($"Populating index for {path}, level={rebuildLevel} ...");
-                    populator.RebuildIndexDirectly(path, rebuildLevel);
+                    populator.RebuildIndexDirectlyAsync(path, CancellationToken.None, rebuildLevel).GetAwaiter().GetResult();
                 }
             }
             finally

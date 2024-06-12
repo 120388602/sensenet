@@ -69,6 +69,88 @@
       </Language>
     </Languages>
   </ResourceClass>
+  <ResourceClass name="Ctd-EmailTemplate">
+    <Languages>
+      <Language cultureName="en">
+        <data name="DisplayName" xml:space="preserve">
+          <value>Email template</value>
+        </data>
+        <data name="Description" xml:space="preserve">
+          <value>Defines an email template used by notification features.</value>
+        </data>
+	      <data name="Subject-DisplayName" xml:space="preserve">
+			<value>Subject</value>
+		  </data>
+	      <data name="Subject-Description" xml:space="preserve">
+			<value>Email subject</value>
+		  </data>
+	      <data name="Body-DisplayName" xml:space="preserve">
+			<value>Body</value>
+		  </data>
+	      <data name="Body-Description" xml:space="preserve">
+			<value>Email message text in richtext format.</value>
+		  </data>
+      </Language>
+      <Language cultureName="hu">
+        <data name="DisplayName" xml:space="preserve">
+          <value>Email minta</value>
+        </data>
+        <data name="Description" xml:space="preserve">
+          <value>Az értesítések küldéséhez használt email tartalomtípus.</value>
+        </data>
+	      <data name="Subject-DisplayName" xml:space="preserve">
+			<value>Tárgy</value>
+		  </data>
+	      <data name="Subject-Description" xml:space="preserve">
+			<value>Levél tárgya</value>
+		  </data>
+	      <data name="Body-DisplayName" xml:space="preserve">
+			<value>Üzenet</value>
+		  </data>
+	      <data name="Body-Description" xml:space="preserve">
+			<value>Üzenet szövege.</value>
+		  </data>
+      </Language>
+    </Languages>
+  </ResourceClass>
+  <ResourceClass name="Ctd-EventList">
+    <Languages>
+      <Language cultureName="en">
+        <data name="DisplayName" xml:space="preserve">
+          <value>Event List</value>
+        </data>
+        <data name="Description" xml:space="preserve">
+          <value>A special container type to store calendar events.</value>
+        </data>
+        <data name="DisplayName-DisplayName" xml:space="preserve">
+          <value>Name</value>
+        </data>
+        <data name="DisplayName-Description" xml:space="preserve">
+          <value>Name of the calendar</value>
+        </data>
+        <data name="RegistrationFolder-DisplayName" xml:space="preserve">
+          <value>Registration folder</value>
+        </data>
+      </Language>
+      <Language cultureName="hu">
+        <data name="DisplayName" xml:space="preserve">
+          <value>Eseménylista</value>
+        </data>
+        <data name="Description" xml:space="preserve">
+          <value>Speciális tároló eseményekhez.</value>
+        </data>
+        <data name="DisplayName-DisplayName" xml:space="preserve">
+          <value>Név</value>
+        </data>
+        <data name="DisplayName-Description" xml:space="preserve">
+          <value>Eseménylista neve</value>
+        </data>
+        <data name="RegistrationFolder-DisplayName" xml:space="preserve">
+          <value>Regisztrációs mappa</value>
+        </data>
+      </Language>
+    </Languages>
+  </ResourceClass>
   <ResourceClass name="Ctd-ExecutableFile">
     <Languages>
       <Language cultureName="en">
@@ -152,6 +234,9 @@
         <data name="Description" xml:space="preserve">
           <value>A type for binary documents, images, etc.</value>
         </data>
+        <data name="Name-DisplayName" xml:space="preserve">
+          <value>Filename</value>
+        </data>
         <data name="Binary-DisplayName" xml:space="preserve">
           <value>Binary</value>
         </data>
@@ -204,6 +289,9 @@
         </data>
         <data name="Description" xml:space="preserve">
           <value>Dokumentumok, képek és egyéb szöveges vagy bináris tartalmak tárolására szolgáló típus.</value>
+        </data>
+        <data name="Name-DisplayName" xml:space="preserve">
+          <value>Fájlnév</value>
         </data>
         <data name="Binary-DisplayName" xml:space="preserve">
           <value>Bináris</value>
@@ -262,11 +350,17 @@
         <data name="Description" xml:space="preserve">
           <value>Use folders to group content.</value>
         </data>
-        <data name="DisplayName-DisplayName" xml:space="preserve">
+		<data name="DisplayName-DisplayName" xml:space="preserve">
           <value>Folder name</value>
         </data>
-        <data name="DisplayName-Description" xml:space="preserve">
+		<data name="DisplayName-Description" xml:space="preserve">
           <value>Display name of the content. You can set any name you prefer without any restrictions.</value>
+        </data>
+		<data name="PreviewEnabled-DisplayName" xml:space="preserve">
+          <value>Preview enabled</value>
+        </data>
+	    <data name="PreviewEnabled-Description" xml:space="preserve">
+          <value>Switch on or off preview generation in this subtree. Can be enabled, disabled or inherited from the parent.</value>
         </data>
       </Language>
       <Language cultureName="hu">
@@ -281,6 +375,53 @@
         </data>
         <data name="DisplayName-Description" xml:space="preserve">
           <value></value>
+        </data>
+		<data name="PreviewEnabled-DisplayName" xml:space="preserve">
+          <value>Előnézet engedélyezése</value>
+        </data>
+	    <data name="PreviewEnabled-Description" xml:space="preserve">
+          <value>Be- vagy kikapcsolja az előnézeti képek generálását ezen a részfán. Engedélyezi, tiltja vagy a szülőről veszi az értéket.</value>
+        </data>
+      </Language>
+    </Languages>
+  </ResourceClass>
+  
+  <ResourceClass name="Ctd-FieldControlTemplate">
+    <Languages>
+      <Language cultureName="en">
+        <data name="DisplayName" xml:space="preserve">
+          <value>FieldControlTemplate</value>
+        </data>
+        <data name="Description" xml:space="preserve">
+          <value>A type for FieldControl templates.</value>
+        </data>
+      </Language>
+      <Language cultureName="hu">
+        <data name="DisplayName" xml:space="preserve">
+          <value>Mező vezérlő sablon</value>
+        </data>
+        <data name="Description" xml:space="preserve">
+          <value>Mező vezérlő sablont tároló fájl</value>
+        </data>
+      </Language>
+    </Languages>
+  </ResourceClass>
+  <ResourceClass name="Ctd-FieldControlTemplates">
+    <Languages>
+      <Language cultureName="en">
+        <data name="DisplayName" xml:space="preserve">
+          <value>FieldControlTemplates</value>
+        </data>
+        <data name="Description" xml:space="preserve">
+          <value>This is the container type for ContentViews. Instances are allowed only at /Root/Global/fieldcontroltemplates.</value>
+        </data>
+      </Language>
+      <Language cultureName="hu">
+        <data name="DisplayName" xml:space="preserve">
+          <value>Mező vezérlő sablonok</value>
+        </data>
+        <data name="Description" xml:space="preserve">
+          <value>Mező vezérlő sablonokat tároló mappa. Csak egy lehet, itt: /Root/Global/fieldcontroltemplates.</value>
         </data>
       </Language>
     </Languages>

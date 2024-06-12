@@ -5,7 +5,9 @@ using SenseNet.ContentRepository.Storage.Search;
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using SenseNet.ContentRepository.Search.Querying;
+using System.Threading;
+using SenseNet.Configuration;
+using STT=System.Threading.Tasks;
 using SenseNet.ContentRepository.Storage.Security;
 using SenseNet.Diagnostics;
 
@@ -39,7 +41,7 @@ namespace SenseNet.ContentRepository
 
         protected virtual void Invalidate()
         {
-            new TreeCacheInvalidatorDistributedAction<T>().Execute();
+            new TreeCacheInvalidatorDistributedAction<T>().ExecuteAsync(CancellationToken.None).GetAwaiter().GetResult();
         }
         protected abstract void InstanceChanged();
         protected void InvalidatePrivate()
@@ -164,25 +166,32 @@ namespace SenseNet.ContentRepository
         {
             public static List<TNode> LoadItemsByContentType(string contentTypeName)
             {
-                var nodeType = ActiveSchema.NodeTypes[contentTypeName];
+                var nodeType = Providers.Instance.StorageSchema.NodeTypes[contentTypeName];
                 if (nodeType == null)
                     return new List<TNode>();
 
-                return NodeQuery.QueryNodesByType(nodeType, false).Nodes
-                    .Select(x => new TNode { Id = x.Id, Path = x.Path.ToLowerInvariant() })
+                var queryResult = NodeQuery.QueryNodesByType(nodeType, false);
+
+                return queryResult.Identifiers
+                    .Select(NodeHead.Get)
+                    .Select(nh => new TNode {Id = nh.Id, Path = nh.Path.ToLowerInvariant()})
                     .ToList();
             }
         }
 
         [Serializable]
-        private class TreeCacheInvalidatorDistributedAction<Q> : DistributedAction where Q : Node
+        public class TreeCacheInvalidatorDistributedAction<Q> : DistributedAction where Q : Node
         {
-            public override void DoAction(bool onRemote, bool isFromMe)
+            public override string TraceMessage => $"SubType: {typeof(Q).Name}";
+            public override STT.Task DoActionAsync(bool onRemote, bool isFromMe, CancellationToken cancellationToken)
             {
                 if (onRemote && isFromMe)
-                    return;
+                    return STT.Task.CompletedTask;
+
                 var instance = (TreeCache<Q>)NodeObserver.GetInstanceByGenericBaseType(typeof(TreeCache<Q>));
                 instance.InvalidatePrivate();
+
+                return STT.Task.CompletedTask;
             }
         }
     }

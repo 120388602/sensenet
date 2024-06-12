@@ -1,12 +1,11 @@
 ﻿using Microsoft.VisualStudio.TestTools.UnitTesting;
 using SenseNet.Search.Querying.Parser;
-using SenseNet.Tests;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+using SenseNet.Testing;
+using SenseNet.Tests.Core;
 
 namespace SenseNet.Search.Tests
 {
@@ -225,8 +224,8 @@ namespace SenseNet.Search.Tests
             var msg = CheckTokensAndEof(tokens, expectedTokens);
             Assert.IsNull(msg, msg);
         }
-        [TestMethod, TestCategory("IR")]
-        public void SnQuery_Lexer_AndOrNot()
+        [TestMethod, TestCategory("IR"), TestCategory("Services")]
+        public void SnQuery_Lexer_AndOrNot_CSrv()
         {
             var expectedTokens = new TokenChecker[]
             {
@@ -471,7 +470,7 @@ namespace SenseNet.Search.Tests
         {
             var s = new String(Enumerable.Range(1, 256 - 32).Select(i => (char)i).ToArray());
             var lexer = new CqlLexer(s);
-            var lexerAcc = new PrivateObject(lexer);
+            var lexerAcc = new ObjectAccessor(lexer);
             var thrown = false;
             try
             {

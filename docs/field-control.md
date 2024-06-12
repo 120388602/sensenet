@@ -8,7 +8,7 @@ tags: [field control, field]
 
 # Field Control
 
-> Although this feature is supported in sensenet ECM 7, it is built on the old Web Forms technology that you **should not use for new projects**. We encourage you to use a more modern UI solution using our [client-side packages](https://www.npmjs.com/org/sensenet).
+> Although this feature is supported in sensenet 7, it is built on the old Web Forms technology that you **should not use for new projects**. We encourage you to use a more modern UI solution using our [client-side packages](https://www.npmjs.com/org/sensenet).
 
 Field Controls are ASP.Net controls that provide GUI for setting/modifying Field values of a [Content](content.md). Thus, Field Controls are the basic building blocks of [Content Views](content-view.md) - views that define the HTML layout of Content when presented.
 
@@ -33,7 +33,7 @@ The following table sums up the different Field Control modes on a [ShortText Fi
 
 <img src="https://raw.githubusercontent.com/SenseNet/sensenet/master/docs/images/shorttext-fieldcontrol.png" style="margin: 20px auto" />
 
-When these properties are not explicitely set in a [Content View](content-view.md), these mode switches fall back to the corresponding properties of the containing Content View: *ViewControlFrameMode* and *ViewControlMode* for controlling the Field Control's FrameMode and ControlMode respectively. Read this section for a short explanation: [Content View](content-view.md#Content-Views-and-Field-Control-modes).
+When these properties are not explicitly set in a [Content View](content-view.md), these mode switches fall back to the corresponding properties of the containing Content View: *ViewControlFrameMode* and *ViewControlMode* for controlling the Field Control's FrameMode and ControlMode respectively. Read this section for a short explanation: [Content View](content-view.md#Content-Views-and-Field-Control-modes).
 
 ## Field Control Templates
 

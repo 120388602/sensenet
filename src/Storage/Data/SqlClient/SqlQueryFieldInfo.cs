@@ -2,6 +2,7 @@
 using SenseNet.ContentRepository.Storage.Schema;
 using System;
 using System.Linq;
+using SenseNet.Configuration;
 using SenseNet.ContentRepository.Search;
 
 namespace SenseNet.Search.Parser
@@ -71,7 +72,7 @@ namespace SenseNet.Search.Parser
         }
         public override string GetSqlTextValue(string termValue)
         {
-            return SearchManager.YesList.Contains(termValue.ToLowerInvariant()) ? " IS NOT NULL" : " IS NULL";
+            return IndexValue.YesList.Contains(termValue.ToLowerInvariant()) ? " IS NOT NULL" : " IS NULL";
         }
     }
 
@@ -94,7 +95,7 @@ namespace SenseNet.Search.Parser
     {
         internal static NodeType GetNodeType(string termValue)
         {
-            var nodeType = SenseNet.ContentRepository.Storage.ActiveSchema.NodeTypes.Where(n => n.Name.ToLower() == termValue).FirstOrDefault();
+            var nodeType = Providers.Instance.StorageSchema.NodeTypes.Where(n => n.Name.ToLower() == termValue).FirstOrDefault();
             if (nodeType == null)
                 throw new ApplicationException("Type is not found: " + termValue);
             return nodeType;
@@ -124,7 +125,7 @@ namespace SenseNet.Search.Parser
     {
         public override object GetParameterValue(string termValue)
         {
-            return SearchManager.YesList.Contains(termValue.ToLowerInvariant()) ? "1" : "0";
+            return IndexValue.YesList.Contains(termValue.ToLowerInvariant()) ? "1" : "0";
         }
         public override string GetSqlTextValue(string termValue)
         {

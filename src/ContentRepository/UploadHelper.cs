@@ -3,6 +3,7 @@ using System.Collections.Specialized;
 using SenseNet.ContentRepository;
 using SenseNet.ContentRepository.Storage;
 using System.IO;
+using System.Threading;
 
 namespace SenseNet.Portal.Handlers
 {
@@ -10,18 +11,7 @@ namespace SenseNet.Portal.Handlers
     {
         // ============================================================================ Consts
         public const string AUTOELEMENT = "Auto";
-
-
-        // ============================================================================ Private methods
-        private static NameValueCollection FileExtensions
-        {
-            get
-            {
-                return System.Configuration.ConfigurationManager.GetSection("sensenet/uploadFileExtensions") as NameValueCollection;
-            }
-        }
-
-
+        
         // ============================================================================ Public methods
         /// <summary>
         /// Determines content type from fileextension or given contentType
@@ -59,14 +49,8 @@ namespace SenseNet.Portal.Handlers
                 if (!string.IsNullOrEmpty(ctName))
                     return ctName;
             }
-
-            // Fallback: look for the extension configuration in web or app config
-            if (FileExtensions == null)
-                return execExt ? Repository.DefaultExecutableFileTypeName : null;
-
-            var fileType = FileExtensions[extension];
-
-            return !string.IsNullOrEmpty(fileType) ? fileType : (execExt ? Repository.DefaultExecutableFileTypeName : null);
+            
+            return execExt ? Repository.DefaultExecutableFileTypeName : null;
         }
 
         /// <summary>
@@ -104,7 +88,7 @@ namespace SenseNet.Portal.Handlers
         public static void ModifyNode(Node node, Stream stream)
         {
             node.SetBinary("Binary", CreateBinaryData(node.Name, stream));
-            node.Save();
+            node.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
         }
     }
 }

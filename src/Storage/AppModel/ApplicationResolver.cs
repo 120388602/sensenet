@@ -2,6 +2,8 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using System.Threading;
+using SenseNet.Configuration;
 using SenseNet.ContentRepository.Search;
 using SenseNet.ContentRepository.Storage.Data;
 using SenseNet.ContentRepository.Storage.Schema;
@@ -145,28 +147,17 @@ namespace SenseNet.ContentRepository.Storage.AppModel
 
         internal static NodeHead ResolveFirstByPaths(IEnumerable<string> paths)
         {
-            if (SearchManager.IsOuterEngineEnabled)
+            if (Providers.Instance.SearchManager.IsOuterEngineEnabled)
                 return ResolveFirstByPathsFromIndexedEngine(paths);
-
-            var script = DataProvider.GetAppModelScript(paths, false, false);
-
-            using (var proc = DataProvider.Instance.CreateDataProcedure(script))
-            {
-                proc.CommandType = System.Data.CommandType.Text;
-
-                using (var reader = proc.ExecuteReader())
-                {
-                    while (reader.Read())
-                        return NodeHead.Get(reader.GetInt32(0));
-                }
-            }
-            return null;
+            return Providers.Instance.DataStore
+                .LoadNodeHeadsFromPredefinedSubTreesAsync(paths, false, false, CancellationToken.None)
+                .GetAwaiter().GetResult().FirstOrDefault();
         }
         private static NodeHead ResolveFirstByPathsFromIndexedEngine(IEnumerable<string> paths)
         {
             foreach (var path in paths)
             {
-                var r = SearchManager.ExecuteContentQuery($"Path:{path}", QuerySettings.AdminSettings);
+                var r = Providers.Instance.SearchManager.ExecuteContentQuery($"Path:{path}", QuerySettings.AdminSettings);
                 if (r.Count > 0)
                     return NodeHead.Get(r.Identifiers.First());
             }
@@ -175,40 +166,11 @@ namespace SenseNet.ContentRepository.Storage.AppModel
 
         internal static IEnumerable<NodeHead> ResolveAllByPaths(IEnumerable<string> paths, bool resolveChildren)
         {
-            if (SearchManager.IsOuterEngineEnabled)
-                return ResolveAllByPathsFromIndexedEngine(paths, resolveChildren);
-
-            var script = DataProvider.GetAppModelScript(paths, true, resolveChildren);
-            var pathIndexer = paths.ToList();
-
-            List<NodeHead>[] resultSorter;
-            using (var proc = DataProvider.Instance.CreateDataProcedure(script))
-            {
-                proc.CommandType = System.Data.CommandType.Text;
-
-                resultSorter = new List<NodeHead>[pathIndexer.Count];
-                using (var reader = proc.ExecuteReader())
-                {
-                    while (reader.Read())
-                    {
-                        var nodeHead = NodeHead.Get(reader.GetInt32(0));
-                        var searchPath = resolveChildren ? RepositoryPath.GetParentPath(nodeHead.Path) : nodeHead.Path;
-                        var index = pathIndexer.IndexOf(searchPath);
-                        if (resultSorter[index] == null)
-                            resultSorter[index] = new List<NodeHead>();
-                        resultSorter[index].Add(nodeHead);
-                    }
-                }
-            }
-            var result = new List<NodeHead>();
-            foreach (var list in resultSorter)
-                if (list != null)
-                {
-                    list.Sort(CompareByName);
-                    foreach (var nodeHead in list)
-                        result.Add(nodeHead);
-                }
-            return result;
+            return Providers.Instance.SearchManager.IsOuterEngineEnabled
+                ? ResolveAllByPathsFromIndexedEngine(paths, resolveChildren)
+                : Providers.Instance.DataStore
+                    .LoadNodeHeadsFromPredefinedSubTreesAsync(paths, true, resolveChildren, CancellationToken.None)
+                    .GetAwaiter().GetResult();
         }
         private static IEnumerable<NodeHead> ResolveAllByPathsFromIndexedEngine(IEnumerable<string> paths, bool resolveChildren)
         {
@@ -217,7 +179,7 @@ namespace SenseNet.ContentRepository.Storage.AppModel
             {
                 if (resolveChildren)
                 {
-                    var r = SearchManager.ExecuteContentQuery("InTree:@0.SORT:Path",
+                    var r = Providers.Instance.SearchManager.ExecuteContentQuery("InTree:@0.SORT:Path",
                         QuerySettings.AdminSettings, path);
                     if (r.Count > 0)
                         // skip first because it is the root of subtree
@@ -232,11 +194,5 @@ namespace SenseNet.ContentRepository.Storage.AppModel
             }
             return heads;
         }
-
-        private static int CompareByName(NodeHead x, NodeHead y)
-        {
-            return x.Path.CompareTo(y.Path);
-        }
-
     }
 }

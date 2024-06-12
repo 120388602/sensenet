@@ -1,6 +1,10 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.IO;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
+using SenseNet.Configuration;
 using SenseNet.ContentRepository;
 
 namespace SenseNet.Packaging
@@ -48,6 +52,7 @@ namespace SenseNet.Packaging
         /// <summary>True if the StartRepository step has already executed.</summary>
         public bool RepositoryStarted { get; internal set; }
         internal bool Test { get; set; }
+        internal RepositoryBuilder RepositoryStartSettings { get; set; }
 
         /// <summary>
         /// DO NOT USE THIS CONSTRUCTOR FROM TESTS. Use ExecutionContext.CreateForTest method instead.
@@ -61,7 +66,7 @@ namespace SenseNet.Packaging
             this.Manifest = manifest;
             this.CurrentPhase = currentPhase;
             this.CountOfPhases = countOfPhases;
-            this.Console = console;
+            this.Console = console ?? TextWriter.Null;
 
             if (manifest == null)
                 return;
@@ -81,6 +86,18 @@ namespace SenseNet.Packaging
             var packageParameters = parameters?.Select(PackageParameter.Parse).ToArray() ?? new PackageParameter[0];
             return new ExecutionContext(packagePath, targetPath, networkTargets, sandboxPath, manifest, currentPhase, countOfPhases, packageParameters, console) { Test = true };
         }
+        internal static ExecutionContext Create(string packagePath, string targetPath, string[] networkTargets, string sandboxPath, Manifest manifest, int currentPhase, int countOfPhases, PackageParameter[] packageParameters, TextWriter console, RepositoryBuilder repositoryBuilder)
+        {
+            var services = repositoryBuilder.Services;
+            var connectionStrings = services.GetRequiredService<IOptions<ConnectionStringOptions>>().Value;
+
+            return new ExecutionContext(packagePath, targetPath, networkTargets, sandboxPath, manifest, currentPhase, countOfPhases, packageParameters, console)
+            {
+                Test = false,
+                RepositoryStartSettings = repositoryBuilder,
+                ConnectionStrings = connectionStrings
+            };
+        }
 
         /// <summary>Verifies that the Repository is running and throws an exception if not.</summary>
         public void AssertRepositoryStarted()
@@ -93,6 +110,8 @@ namespace SenseNet.Packaging
         public TerminationReason TerminationReason { get; private set; }
         public bool Terminated { get { return TerminationMessage != null; } }
         public int TerminatorStepId { get; private set; }
+        public ConnectionStringOptions ConnectionStrings { get; private set; }
+
         public void TerminateExecution(string message, TerminationReason reason, Steps.Step terminatorStep)
         {
             this.TerminationMessage = message;

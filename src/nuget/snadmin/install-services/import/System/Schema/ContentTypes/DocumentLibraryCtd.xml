@@ -2,9 +2,42 @@
 <ContentType name="DocumentLibrary" parentType="Library" handler="SenseNet.ContentRepository.ContentList" xmlns="http://schemas.sensenet.com/SenseNet/ContentRepository/ContentTypeDefinition">
   <DisplayName>$Ctd-DocumentLibrary,DisplayName</DisplayName>
   <Description>$Ctd-DocumentLibrary,Description</Description>
-  <Icon>ContentList</Icon>
+  <Icon>DocumentLibrary</Icon>
   <AllowedChildTypes>
     Folder,File
   </AllowedChildTypes>
-  <Fields></Fields>
+  <Fields>
+    <Field name="DisplayName" type="ShortText">
+    <DisplayName>$Ctd-DocumentLibrary,DisplayName-DisplayName</DisplayName>
+      <Description>$Ctd-DocumentLibrary,DisplayName-Description</Description>
+      <Configuration>
+        <FieldIndex>20</FieldIndex>
+      </Configuration>
+    </Field>
+    <Field name="Name" type="ShortText">
+      <Configuration>
+        <FieldIndex>10</FieldIndex>
+        <DefaultValue>DocumentLibrary</DefaultValue>
+        <VisibleBrowse>Hide</VisibleBrowse>
+        <VisibleEdit>Hide</VisibleEdit>
+        <VisibleNew>Hide</VisibleNew>
+      </Configuration>
+    </Field>
+    <Field name="Index" type="Integer">
+      <Configuration>
+      </Configuration>
+    </Field>
+    <Field name="InheritableVersioningMode" type="InheritableVersioningMode">
+      <Configuration>
+      </Configuration>
+    </Field>
+    <Field name="InheritableApprovingMode" type="InheritableApprovingMode">
+      <Configuration>
+      </Configuration>
+    </Field>
+    <Field name="AllowedChildTypes" type="AllowedChildTypes">
+      <Configuration>
+      </Configuration>
+    </Field>
+  </Fields>
 </ContentType>

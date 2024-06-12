@@ -1,9 +1,9 @@
 using System;
-using System.Collections.Generic;
-using System.Text;
 using System.Globalization;
 using System.Linq;
+using SenseNet.Configuration;
 using SenseNet.Tools;
+// ReSharper disable InconsistentNaming
 
 namespace SenseNet.ContentRepository.Storage
 {
@@ -12,13 +12,10 @@ namespace SenseNet.ContentRepository.Storage
     /// </summary>
     internal static class SR
 	{
-        private static IResourceManager resMan;
-        internal static IResourceManager ResourceManager
-        {
-            get { return resMan; }
-        }
+        private static readonly IResourceManager resMan;
+        internal static IResourceManager ResourceManager => resMan;
 
-        static SR()
+	    static SR()
         {
             var resManType = TypeResolver.GetTypesByInterface(typeof(IResourceManager))
                 .FirstOrDefault(t => t.FullName != typeof(DefaultResourceManager).FullName);
@@ -54,7 +51,7 @@ namespace SenseNet.ContentRepository.Storage
 				internal static string Msg_ParameterValueCannotBeZero = "The value of parameter cannot be zero.";
 
 				internal static string Msg_InvalidPath_1 = "The path is invalid: {0}";
-				internal static string Msg_PathTooLong = "Path exceeds the maximum lenght allowed";
+				internal static string Msg_PathTooLong = "Path exceeds the maximum length allowed";
 				internal static string Msg_ParentNodeDoesNotExists = "Parent Node does not exists";
 				internal static string Msg_NameCannotBeEmpty = "Name cannot be Empty";
 				internal static string Msg_InvalidName = "The Name is invalid";
@@ -65,13 +62,13 @@ namespace SenseNet.ContentRepository.Storage
                 internal static Exception Exc_LessThanDateTimeMinValue()
                 {
 					return new ArgumentOutOfRangeException(String.Concat("DateTime value cannot be less than ",
-						Data.DataProvider.Current.DateTimeMinValue.ToString(CultureInfo.CurrentCulture)));
-				}
+						Providers.Instance.DataStore.DateTimeMinValue.ToString(CultureInfo.CurrentCulture)));
+                }
 				internal static Exception Exc_BiggerThanDateTimeMaxValue()
 				{
 					return new ArgumentOutOfRangeException(String.Concat("DateTime value cannot be bigger than ",
-						Data.DataProvider.Current.DateTimeMaxValue.ToString(CultureInfo.CurrentCulture)));
-				}
+                        Providers.Instance.DataStore.DateTimeMaxValue.ToString(CultureInfo.CurrentCulture)));
+                }
 
                 internal static string Error_Preview_BinaryAccess_2 = "$Error_Storage:Preview_BinaryAccess_2";
                 internal static string Error_PathTooLong_1 = "$Error_Storage:PathTooLong_1";

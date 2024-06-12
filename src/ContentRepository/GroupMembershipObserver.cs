@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using SenseNet.Configuration;
 using SenseNet.ContentRepository.Search;
 using SenseNet.ContentRepository.Storage.Events;
@@ -72,11 +73,13 @@ namespace SenseNet.ContentRepository.Storage.Security
 
             // remove relevant child content from the original parent org unit (if it is different from the target)
             if (originalParentId > 0 && originalParentId != targetParentId)
-                SecurityHandler.RemoveMembers(originalParentId, movedUsers, movedGroups);
+                Providers.Instance.SecurityHandler.RemoveMembersAsync(originalParentId, movedUsers, movedGroups,
+                    CancellationToken.None).GetAwaiter().GetResult();
 
             // add the previously collected identities to the target orgunit (if it is different from the original)
             if (targetParentId > 0 && originalParentId != targetParentId)
-                SecurityHandler.AddMembers(targetParentId, movedUsers, movedGroups);
+                Providers.Instance.SecurityHandler.AddMembersAsync(targetParentId, movedUsers, movedGroups,
+                    CancellationToken.None).GetAwaiter().GetResult();
         }
 
         protected override void OnNodeDeletingPhysically(object sender, CancellableNodeEventArgs e)
@@ -93,7 +96,8 @@ namespace SenseNet.ContentRepository.Storage.Security
             base.OnNodeDeletedPhysically(sender, e);
 
             if (e.GetCustomData(IdentitiesCustomDataKey) is List<int> ids)
-                SecurityHandler.DeleteIdentities(ids);
+                if (ids.Count > 0)
+                    Providers.Instance.SecurityHandler.DeleteIdentitiesAsync(ids, CancellationToken.None).GetAwaiter().GetResult();
         }
 
         // ======================================================================================= Helper methods
@@ -129,13 +133,14 @@ namespace SenseNet.ContentRepository.Storage.Security
             using (new SystemAccount())
             {
                 // import scenario
-                if (!SearchManager.ContentQueryIsAllowed)
+                if (!Providers.Instance.SearchManager.ContentQueryIsAllowed)
                 {
+                    var schema = Providers.Instance.StorageSchema;
                     var resultIds = NodeQuery.QueryNodesByTypeAndPathAndName(new[]
                     {
-                        ActiveSchema.NodeTypes["Group"], 
-                        ActiveSchema.NodeTypes["OrganizationalUnit"],
-                        ActiveSchema.NodeTypes["User"]
+                        schema.NodeTypes["Group"],
+                        schema.NodeTypes["OrganizationalUnit"],
+                        schema.NodeTypes["User"]
                     },
                     false, node.Path, true, null).Identifiers.ToList();
 
@@ -146,7 +151,8 @@ namespace SenseNet.ContentRepository.Storage.Security
                     return resultIds;
                 }
 
-                return ContentQuery.Query(SafeQueries.SecurityIdentitiesInTree, QuerySettings.AdminSettings, node.Path).Identifiers.ToList();
+                return ContentQuery.QueryAsync(SafeQueries.SecurityIdentitiesInTree, QuerySettings.AdminSettings,
+                    CancellationToken.None, node.Path).ConfigureAwait(false).GetAwaiter().GetResult().Identifiers.ToList();
             }
         }
 
@@ -156,7 +162,9 @@ namespace SenseNet.ContentRepository.Storage.Security
         /// </summary>
         private static void CollectSecurityIdentityChildren(NodeHead head, ICollection<int> userIds, ICollection<int> groupIds)
         {
-            foreach (var childHead in ContentQuery.Query(SafeQueries.InFolder, QuerySettings.AdminSettings, head.Path).Identifiers.Select(NodeHead.Get).Where(h => h != null))
+            foreach (var childHead in ContentQuery.QueryAsync(SafeQueries.InFolder, QuerySettings.AdminSettings,
+                 CancellationToken.None, head.Path).ConfigureAwait(false).GetAwaiter().GetResult()
+                 .Identifiers.Select(NodeHead.Get).Where(h => h != null))
             {
                 // in case of identity types: simply add them to the appropriate collection and move on
                 if (childHead.GetNodeType().IsInstaceOfOrDerivedFrom("User"))

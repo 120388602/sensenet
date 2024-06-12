@@ -1,11 +1,13 @@
 ﻿using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Threading;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
+using SenseNet.ContentRepository.Fields;
 using SenseNet.ContentRepository.Schema;
 using SenseNet.ContentRepository.Storage;
 using SenseNet.Diagnostics;
-using SenseNet.Tests;
+using SenseNet.Tests.Core;
 // ReSharper disable UnusedMember.Local
 
 namespace SenseNet.ContentRepository.Tests
@@ -90,7 +92,7 @@ namespace SenseNet.ContentRepository.Tests
                 Assert.AreSame(content, node.Content);
 
                 node.Index = 3;
-                content.Save();
+                content.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                 Assert.AreSame(content, node.Content);
             });
@@ -111,7 +113,7 @@ namespace SenseNet.ContentRepository.Tests
                 node.Index = 2;
                 Assert.AreEqual(2, (int)content[fieldName]);
 
-                node.Save();
+                node.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                 Assert.AreEqual(2, node.Index);
                 Assert.AreEqual(2, (int)content[fieldName]);
 
@@ -122,7 +124,7 @@ namespace SenseNet.ContentRepository.Tests
                 node.Index = 3;
                 Assert.AreEqual(3, (int)content[fieldName]);
 
-                node.Save();
+                node.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                 Assert.IsTrue(CreateSafeContentQuery($"+{fieldName}:3 +Name:{contentName} .AUTOFILTERS:OFF").Execute().Identifiers.Any());
             });
@@ -138,7 +140,7 @@ namespace SenseNet.ContentRepository.Tests
                 var fieldName = nameof(node.Index);
                 var content = node.Content;
                 Assert.AreEqual(1, (int)content[fieldName]);
-                node.Save();
+                node.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                 // change
                 node.Index = 42;
@@ -150,7 +152,7 @@ namespace SenseNet.ContentRepository.Tests
                 // check
                 Assert.AreEqual(1, (int)content[fieldName]);
 
-                node.Save();
+                node.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                 Assert.IsTrue(CreateSafeContentQuery($"+{fieldName}:1 +Name:{contentName} .AUTOFILTERS:OFF").Execute().Identifiers.Any());
             });
         }
@@ -164,23 +166,23 @@ namespace SenseNet.ContentRepository.Tests
                 var node = new SystemFolder(Repository.Root) { Name = contentName, Description = "Desc1" };
                 var fieldName = nameof(node.Description);
                 var content = node.Content;
-                Assert.AreEqual("Desc1", (string)content[fieldName]);
+                Assert.AreEqual("Desc1", ((RichTextFieldValue)content[fieldName]).Text);
 
                 node.Description = "Desc2";
-                Assert.AreEqual("Desc2", (string)content[fieldName]);
+                Assert.AreEqual("Desc2", ((RichTextFieldValue)content[fieldName]).Text);
 
-                node.Save();
+                node.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                 Assert.AreEqual("Desc2", node.Description);
-                Assert.AreEqual("Desc2", (string)content[fieldName]);
+                Assert.AreEqual("Desc2", ((RichTextFieldValue)content[fieldName]).Text);
 
                 content[fieldName] = "Desc42";
                 Assert.AreEqual("Desc2", node.Description);
                 Assert.AreEqual("Desc42", (string)content[fieldName]);
 
                 node.Description = "Desc3";
-                Assert.AreEqual("Desc3", (string)content[fieldName]);
+                Assert.AreEqual("Desc3", ((RichTextFieldValue)content[fieldName]).Text);
 
-                node.Save();
+                node.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                 Assert.IsTrue(CreateSafeContentQuery($"+{fieldName}:Desc3 +Name:{contentName} .AUTOFILTERS:OFF").Execute().Identifiers.Any());
             });
@@ -196,17 +198,17 @@ namespace SenseNet.ContentRepository.Tests
                 var node = new SystemFolder(Repository.Root) { Name = contentName, Description = originalValue };
                 var fieldName = nameof(node.Description);
                 var content = node.Content;
-                node.Save();
+                node.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                 Assert.AreEqual(originalValue, node.Description);
-                Assert.AreEqual(originalValue, (string)content[fieldName]);
+                Assert.AreEqual(originalValue, ((RichTextFieldValue)content[fieldName]).Text);
 
                 node.Description = "Changed";
-                Assert.AreEqual("Changed", (string)content[fieldName]);
+                Assert.AreEqual("Changed", ((RichTextFieldValue)content[fieldName]).Text);
 
                 node.Description = originalValue;
-                Assert.AreEqual(originalValue, (string)content[fieldName]);
+                Assert.AreEqual(originalValue, ((RichTextFieldValue)content[fieldName]).Text);
 
-                node.Save();
+                node.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                 Assert.IsTrue(CreateSafeContentQuery($"+{fieldName}:{originalValue} +Name:{contentName} .AUTOFILTERS:OFF").Execute().Identifiers.Any());
             });
@@ -237,7 +239,7 @@ namespace SenseNet.ContentRepository.Tests
                 Assert.AreEqual(testValue, (string)content[fieldName]);
 
                 content[fieldName] = "TestValue42";
-                node.Save();
+                node.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                 Assert.AreSame(content, node.Content);
                 Assert.AreEqual(testValue, (string)content[fieldName]);
             });
@@ -268,7 +270,7 @@ namespace SenseNet.ContentRepository.Tests
                 Assert.AreEqual(testValue, (int)content[fieldName]);
 
                 content[fieldName] = 42;
-                node.Save();
+                node.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                 Assert.AreSame(content, node.Content);
                 Assert.AreEqual(testValue, (int)content[fieldName]);
             });
@@ -288,7 +290,7 @@ namespace SenseNet.ContentRepository.Tests
                 var content = node.Content;
 
                 content[fieldName] = testValue;
-                node.Save();
+                node.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                 Assert.IsTrue(CreateSafeContentQuery($"+{fieldName}:42 +Name:{contentName} .AUTOFILTERS:OFF").Execute().Identifiers.Any());
             });
@@ -297,7 +299,7 @@ namespace SenseNet.ContentRepository.Tests
         private SystemFolder CreateTestRoot()
         {
             var node = new SystemFolder(Repository.Root) { Name = "TestRoot" };
-            node.Save();
+            node.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
             return node;
         }
     }

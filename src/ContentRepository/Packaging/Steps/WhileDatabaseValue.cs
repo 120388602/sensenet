@@ -1,7 +1,10 @@
 ﻿using System;
-using System.Data;
 using System.Diagnostics.CodeAnalysis;
-using SenseNet.ContentRepository.Storage.Data;
+using System.Threading;
+using SenseNet.Configuration;
+using SenseNet.ContentRepository.Storage.Data.MsSqlClient;
+using SenseNet.Diagnostics;
+using SenseNet.Tools;
 
 namespace SenseNet.Packaging.Steps
 {
@@ -22,29 +25,32 @@ namespace SenseNet.Packaging.Steps
             if (string.IsNullOrEmpty(Query))
                 throw new PackagingException(PackagingExceptionType.InvalidParameter);
 
-            return ExecuteSql(Query);
+            return ExecuteSql(Query, context.ConnectionStrings.Repository);
         }
 
-        internal static bool ExecuteSql(string script)
+        internal bool ExecuteSql(string script, string connectionString)
         {
-            using (var proc = DataProvider.Instance.CreateDataProcedure(script))
-            {
-                proc.CommandType = CommandType.Text;
-                object result;
+            using var op = SnTrace.Database.StartOperation("WhileDatabaseValue: " +
+                $"ExecuteSql: {script.ToTrace()}");
 
-                try
-                {
-                    result = proc.ExecuteScalar();
-                }
-                catch (Exception ex)
-                {
-                    throw new PackagingException("Error during SQL script execution. " + ex);
-                }
+            //TODO: [DIREF] get options from DI through constructor
+            using var ctx = new MsSqlDataContext(connectionString, DataOptions.GetLegacyConfiguration(),
+                GetService<IRetrier>(), CancellationToken.None);
+            try
+            {
+                var result = ctx.ExecuteScalarAsync(script).GetAwaiter().GetResult();
 
                 if (result == null || Convert.IsDBNull(result))
+                {
+                    op.Successful = true;
                     return false;
-
+                }
+                op.Successful = true;
                 return ConvertToBool(result);
+            }
+            catch (Exception ex)
+            {
+                throw new PackagingException("Error during SQL script execution. " + ex);
             }
         }
 

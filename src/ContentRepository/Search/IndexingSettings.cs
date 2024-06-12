@@ -2,6 +2,9 @@
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Linq;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using SenseNet.Configuration;
 using SenseNet.ContentRepository;
 using SenseNet.ContentRepository.Schema;
 using SenseNet.ContentRepository.Search.Indexing;
@@ -9,6 +12,7 @@ using SenseNet.ContentRepository.Storage;
 using SenseNet.ContentRepository.Storage.Events;
 using SenseNet.Diagnostics;
 using SenseNet.Tools;
+using EventId = SenseNet.Diagnostics.EventId;
 
 // ReSharper disable once CheckNamespace
 namespace SenseNet.Search
@@ -63,7 +67,9 @@ namespace SenseNet.Search
 
                             SetCachedData(TextExtractorsCacheKey, _textExtractors);
 
-                            SnLog.WriteInformation("Text extractors were created.", properties: _textExtractors.ToDictionary(t => t.Key, t => (object)t.Value.GetType().FullName));
+                            var logger = Providers.Instance.Services.GetRequiredService<ILogger<IndexingSettings>>();
+                            logger.LogInformation($"Text extractors were created. File extensions and types: " +
+                                $"{string.Join(", ", _textExtractors.Select(t => $"'.{t.Key}': {t.Value.GetType().FullName}"))}");
                         }
                     }
                 }
@@ -78,24 +84,17 @@ namespace SenseNet.Search
         /// </summary>
         private Dictionary<string, ITextExtractor> LoadTextExtractors()
         {
-            var extractors = new Dictionary<string, ITextExtractor>
-                            {
-                                {"contenttype", new XmlTextExtractor()},
-                                {"xml", new XmlTextExtractor()},
-                                {"doc", new DocTextExtractor()},
-                                {"xls", new XlsTextExtractor()},
-                                {"xlb", new XlbTextExtractor()},
-                                {"msg", new MsgTextExtractor()},
-                                {"pdf", new PdfTextExtractor()},
-                                {"docx", new DocxTextExtractor()},
-                                {"docm", new DocxTextExtractor()},
-                                {"xlsx", new XlsxTextExtractor()},
-                                {"xlsm", new XlsxTextExtractor()},
-                                {"pptx", new PptxTextExtractor()},
-                                {"txt", new PlainTextExtractor()},
-                                {"settings", new PlainTextExtractor()},
-                                {"rtf", new RtfTextExtractor()}
-                            };
+            var instances = Providers.Instance.Services.GetServices<ITextExtractor>().Distinct().ToArray();
+            var instancesByType = new Dictionary<Type, ITextExtractor>();
+            // only one instance is relevant
+            foreach (var instance in instances)
+                instancesByType[instance.GetType()] = instance;
+
+            var registration = Providers.Instance.Services.GetServices<TextExtractorRegistration>();
+            var extractors = new Dictionary<string, ITextExtractor>();
+            // only the last item is relevant
+            foreach (var registrationItem in registration)
+                extractors[registrationItem.FileExtension] = instancesByType[registrationItem.TextExtractorType];
 
             // load text extractor settings (they may override the defaults listed above)
             foreach (var field in Content.Fields.Values.Where(field => field.Name.StartsWith(TextExtractorsTextfieldName + ".")))
@@ -113,7 +112,7 @@ namespace SenseNet.Search
                 }
                 catch (Exception ex)
                 {
-                    SnLog.WriteWarning($"Text extractor type could not be instatiated: {extractorName} {ex}", EventId.Indexing);
+                    SnLog.WriteWarning($"Text extractor type could not be instantiated: {extractorName} {ex}", EventId.Indexing);
                 }
             }
 

@@ -2,17 +2,23 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
+using SenseNet.Configuration;
 using SenseNet.ContentRepository.Storage;
+using SenseNet.ContentRepository.Storage.Data;
 using SenseNet.ContentRepository.Versioning;
-using SenseNet.Tests;
+using SenseNet.Testing;
+using SenseNet.Tests.Core;
 
 namespace SenseNet.ContentRepository.Tests
 {
     [TestClass]
     public class VersionExistenceTests : TestBase
     {
+        private IDataStore DataStore => Providers.Instance.DataStore;
+
         [TestMethod]
         public void Versioning_LostVersion_NodeDataIsNull()
         {
@@ -23,20 +29,21 @@ namespace SenseNet.ContentRepository.Tests
 
                 file.ApprovingMode = ApprovingType.False;
                 file.VersioningMode = VersioningType.None;
-                file.Save();
+                file.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                 var contentId = file.Id;
 
                 //-- Thread #1
-                file.CheckOut();
+                file.CheckOutAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                 //-- Thread #2
-                var head = DataBackingStore.GetNodeHead(contentId);
+                var head = DataStore.LoadNodeHeadAsync(contentId, CancellationToken.None).GetAwaiter().GetResult();
 
                 //-- Thread #1
-                file.CheckIn();
+                file.CheckInAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                 //-- Thread #2
-                var data = DataBackingStore.GetNodeData(head, head.LastMinorVersionId).NodeData;
+                var data = DataStore.LoadNodeAsync(head, head.LastMinorVersionId, CancellationToken.None)
+                    .GetAwaiter().GetResult().NodeData;
                 Assert.IsNull(data);
             });
         }
@@ -49,17 +56,17 @@ namespace SenseNet.ContentRepository.Tests
                 var file = CreateTestFile(save: false);
                 file.ApprovingMode = ApprovingType.False;
                 file.VersioningMode = VersioningType.None;
-                file.Save();
+                file.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                 var contentId = file.Id;
 
                 //-- Thread #1
-                file.CheckOut();
+                file.CheckOutAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                 //-- Thread #2
-                var head = DataBackingStore.GetNodeHead(contentId);
+                var head = DataStore.LoadNodeHeadAsync(contentId, CancellationToken.None).GetAwaiter().GetResult();
 
                 //-- Thread #1
-                file.CheckIn();
+                file.CheckInAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                 //-- Thread #2
                 var node = LoadNode(head, VersionNumber.LastAccessible);
@@ -75,17 +82,17 @@ namespace SenseNet.ContentRepository.Tests
                 var file = CreateTestFile(save: false);
                 file.ApprovingMode = ApprovingType.False;
                 file.VersioningMode = VersioningType.None;
-                file.Save();
+                file.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                 var contentId = file.Id;
 
                 //-- Thread #1
-                file.CheckOut();
+                file.CheckOutAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                 //-- Thread #2
-                var head = DataBackingStore.GetNodeHead(contentId);
+                var head = DataStore.LoadNodeHeadAsync(contentId, CancellationToken.None).GetAwaiter().GetResult();
 
                 //-- Thread #1
-                file.ForceDelete();
+                file.ForceDeleteAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                 //-- Thread #2
                 var node = LoadNode(head, VersionNumber.LastAccessible);
@@ -107,7 +114,7 @@ namespace SenseNet.ContentRepository.Tests
                     var file = CreateTestFile(save: false, parent: root);
                     file.ApprovingMode = ApprovingType.False;
                     file.VersioningMode = VersioningType.None;
-                    file.Save();
+                    file.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                     files[i] = file;
                     ids[i] = file.Id;
@@ -115,15 +122,15 @@ namespace SenseNet.ContentRepository.Tests
                 }
 
                 //-- Thread #1
-                files[1].CheckOut();
-                files[3].CheckOut();
+                files[1].CheckOutAsync(CancellationToken.None).GetAwaiter().GetResult();
+                files[3].CheckOutAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                 //-- Thread #2
-                var heads = DataBackingStore.GetNodeHeads(ids);
+                var heads = DataStore.LoadNodeHeadsAsync(ids, CancellationToken.None).GetAwaiter().GetResult();
 
                 //-- Thread #1
-                files[1].CheckIn();
-                files[3].CheckIn();
+                files[1].CheckInAsync(CancellationToken.None).GetAwaiter().GetResult();
+                files[3].CheckInAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                 //-- Thread #2
                 var nodes = LoadNodes(heads, VersionNumber.LastAccessible);
@@ -144,7 +151,7 @@ namespace SenseNet.ContentRepository.Tests
                     var file = CreateTestFile(root, null, false);
                     file.ApprovingMode = ApprovingType.False;
                     file.VersioningMode = VersioningType.None;
-                    file.Save();
+                    file.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                     return file;
                 }).ToArray();
                 var ids = gcontents.Select(c => c.Id).ToArray();
@@ -153,16 +160,16 @@ namespace SenseNet.ContentRepository.Tests
                 var versionids = gcontents.Select(c => c.VersionId).ToArray();
 
                 //-- Thread #1
-                gcontents[1].CheckOut();
-                gcontents[3].CheckOut();
+                gcontents[1].CheckOutAsync(CancellationToken.None).GetAwaiter().GetResult();
+                gcontents[3].CheckOutAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                 //-- Thread #2
-                var heads = DataBackingStore.GetNodeHeads(ids);
+                var heads = DataStore.LoadNodeHeadsAsync(ids, CancellationToken.None).GetAwaiter().GetResult();
 
                 //-- Thread #1
-                gcontents[1].CheckIn();
-                gcontents[3].ForceDelete();
-                gcontents[2].ForceDelete();
+                gcontents[1].CheckInAsync(CancellationToken.None).GetAwaiter().GetResult();
+                gcontents[3].ForceDeleteAsync(CancellationToken.None).GetAwaiter().GetResult();
+                gcontents[2].ForceDeleteAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                 //-- Thread #2
                 var nodes = LoadNodes(heads, VersionNumber.LastAccessible);
@@ -179,13 +186,13 @@ namespace SenseNet.ContentRepository.Tests
 
         private Node LoadNode(NodeHead head, VersionNumber version)
         {
-            var nodeAcc = new PrivateType(typeof(Node));
+            var nodeAcc = new TypeAccessor(typeof(Node));
             var node = (Node)nodeAcc.InvokeStatic("LoadNode", head, version);
             return node;
         }
         private List<Node> LoadNodes(IEnumerable<NodeHead> heads, VersionNumber version)
         {
-            var nodeAcc = new PrivateType(typeof(Node));
+            var nodeAcc = new TypeAccessor(typeof(Node));
             var nodes = (List<Node>)nodeAcc.InvokeStatic("LoadNodes", heads, version);
             return nodes;
         }
@@ -194,7 +201,7 @@ namespace SenseNet.ContentRepository.Tests
         {
             var node = new SystemFolder(Repository.Root) { Name = Guid.NewGuid().ToString() };
             if (save)
-                node.Save();
+                node.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
             return node;
         }
 
@@ -213,7 +220,7 @@ namespace SenseNet.ContentRepository.Tests
         {
             var file = new File(parent) { Name = name ?? Guid.NewGuid().ToString() };
             if (save)
-                file.Save();
+                file.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
             return file;
         }
 

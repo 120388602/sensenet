@@ -1,8 +1,7 @@
 using System;
-using System.Collections.Generic;
-using System.Text;
-using SenseNet.ContentRepository.Storage.Caching.Dependency;
-using SenseNet.ContentRepository;
+using System.Threading;
+using System.Threading.Tasks;
+using SenseNet.Configuration;
 using SenseNet.Diagnostics;
 
 namespace SenseNet.Communication.Messaging
@@ -14,34 +13,50 @@ namespace SenseNet.Communication.Messaging
     [Serializable]
     public abstract class DistributedAction : ClusterMessage
     {
-        public void Execute()
+        /// <summary>
+        /// Executes the activity's main action and distributes it to the other app domains in the cluster.
+        /// </summary>
+        /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
+        /// <returns>A Task that represents the asynchronous operation.</returns>
+        public async Task ExecuteAsync(CancellationToken cancellationToken)
         {
             try
             {
-                DoAction(false, true);
-                SnTrace.Messaging.Write("Execute DistributedAction: {0}", this);
+                SnTrace.Messaging.Write(() => $"Executing DistributedAction ({GetType().Name}): {TraceMessage}");
+                await DoActionAsync(false, true, cancellationToken).ConfigureAwait(false);
             }
             finally
             {
                 try
                 {
-                    Distribute();
+                    await DistributeAsync(cancellationToken).ConfigureAwait(false);
                 }
                 catch (Exception exc2) // logged
                 {
                     SnLog.WriteException(exc2);
                 }
             }
-            
         }
 
-        public abstract void DoAction(bool onRemote, bool isFromMe);
+        /// <summary>
+        /// Executes the activity's main action.
+        /// </summary>
+        /// <param name="onRemote">True if the caller is a message receiver.</param>
+        /// <param name="isFromMe">True if the source of the activity is in the current appDomain.</param>
+        /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
+        /// <returns>A Task that represents the asynchronous operation.</returns>
+        public abstract Task DoActionAsync(bool onRemote, bool isFromMe, CancellationToken cancellationToken);
 
-        public virtual void Distribute()
+        /// <summary>
+        /// Distributes the activity to the other app domains in the cluster.
+        /// </summary>
+        /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
+        /// <returns>A Task that represents the asynchronous operation.</returns>
+        public virtual async Task DistributeAsync(CancellationToken cancellationToken)
         {
             try
             {
-                DistributedApplication.ClusterChannel.Send(this);
+                await Providers.Instance.ClusterChannelProvider.SendAsync(this, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception exc) // logged
             {
@@ -54,21 +69,24 @@ namespace SenseNet.Communication.Messaging
     public class DebugMessage : ClusterMessage
     {
         public string Message { get; set; }
+        public override string TraceMessage => Message;
         public override string ToString()
         {
             return "DebugMessage: " + Message;
         }
 
-        public static void Send(string message)
+        public static Task SendAsync(string message, CancellationToken cancellationToken)
         {
-            new DebugMessage() { Message = message }.Send();
+            var dm = new DebugMessage { Message = message };
+            return dm.SendAsync(cancellationToken);
         }
     }
 
     [Serializable]
     public sealed class PingMessage : DebugMessage
     {
-        public readonly Guid Id;
+        public Guid Id { get; set; }
+        public override string TraceMessage => $"PING {Id}";
         public string[] NotResponsiveChannels { get; private set; }
         public PingMessage(string[] notResponsiveChannels = null)
         {
@@ -81,7 +99,8 @@ namespace SenseNet.Communication.Messaging
     [Serializable]
     public sealed class PongMessage : DebugMessage
     {
-        public Guid PingId;
+        public Guid PingId { get; set; }
+        public override string TraceMessage => $"PONG {PingId}";
         public PongMessage()
         {
             Message = "PONG";
@@ -92,6 +111,7 @@ namespace SenseNet.Communication.Messaging
     public sealed class WakeUp : DebugMessage
     {
         public string Target { get; private set; }
+        public override string TraceMessage => $"WAKEUP {Target}";
 
         public WakeUp(string target)
         {

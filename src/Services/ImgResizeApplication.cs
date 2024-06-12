@@ -279,7 +279,7 @@ namespace SenseNet.Portal.ApplicationModel
         {
             get
             {
-                var cacheFolder = Configuration.Cache.ResizedImagesCacheFolder;
+                var cacheFolder = Configuration.CacheConfiguration.ResizedImagesCacheFolder;
                 if (string.IsNullOrEmpty(cacheFolder))
                     throw new Exception("Configuration for Image Resize Application could not be found.");
 
@@ -425,7 +425,7 @@ namespace SenseNet.Portal.ApplicationModel
         /// <summary>
         /// Checks if the given image is cached on the disk.
         /// </summary>
-        /// <param name="contentPath">Path of image in the Repository to be checked for existance on the disk.</param>
+        /// <param name="contentPath">Path of image in the Repository to be checked for existence on the disk.</param>
         /// <returns>Returns true if the given image can be found on the disk.</returns>
         private bool IsCached(string contentPath)
         {

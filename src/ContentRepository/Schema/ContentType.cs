@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.IO;
 using System.Reflection;
 using System.Xml;
@@ -9,6 +10,8 @@ using SenseNet.ContentRepository.Storage.Schema;
 using SenseNet.ContentRepository.Storage.Search;
 using System.Linq;
 using System.Text;
+using System.Threading;
+using SenseNet.Configuration;
 using SenseNet.ContentRepository.Storage.Data;
 using SenseNet.Diagnostics;
 using SenseNet.Search;
@@ -17,6 +20,9 @@ using SenseNet.ContentRepository.Linq;
 using SenseNet.ContentRepository.Search;
 using SenseNet.ContentRepository.Search.Indexing;
 using SenseNet.ContentRepository.Search.Querying;
+using SenseNet.ContentRepository.Sharing;
+using SenseNet.ContentRepository.Storage.Security;
+using SenseNet.Storage;
 using SenseNet.Tools;
 
 namespace  SenseNet.ContentRepository.Schema
@@ -25,7 +31,7 @@ namespace  SenseNet.ContentRepository.Schema
     /// Defines a class that can handle a Content type in the sensenet Content Repository.
     /// </summary>
     [ContentHandler]
-    public class ContentType : Node, IFolder, IIndexableDocument
+    public class ContentType : Node, IFolder, IIndexableDocument, IContentType
     {
         internal static readonly string ContentDefinitionXmlNamespaceOld = "http://schemas.sensenet" + ".hu/SenseNet/ContentRepository/ContentTypeDefinition";
         /// <summary>
@@ -46,8 +52,11 @@ namespace  SenseNet.ContentRepository.Schema
         private string _extension;
         private string _appInfo;
         private bool? _allowIncrementalNaming;
+        private bool? _isSystemType;
         private bool? _previewEnabled;
         private bool? _indexingEnabled;
+
+        private StorageSchema StorageSchema => Providers.Instance.StorageSchema;
 
         // ====================================================================== Node interface: Properties
 
@@ -127,10 +136,35 @@ namespace  SenseNet.ContentRepository.Schema
         /// </summary>
         public List<ContentType> ChildTypes { get; private set; }
 
+        private bool _isUnknownHandler;
+        private bool IsUnknownHandler
+        {
+            get => _isUnknownHandler || (this.ParentType?.IsUnknownHandler ?? false);
+            set => _isUnknownHandler = value;
+        }
+
+        private bool _hasUnknownField;
+        private bool HasUnknownField
+        {
+            get => _hasUnknownField || (this.ParentType?.HasUnknownField ?? false);
+            set => _hasUnknownField = value;
+        }
+
+        internal bool IsInvalid => IsUnknownHandler || HasUnknownField;
+
         /// <summary>
         /// Gets the description of the ContentType. This value comes from the ContentTypeDefinition.
         /// </summary>
         public string Description { get; private set; }
+
+        /// <summary>
+        /// Gets the categories of the ContentType. This value comes from the ContentTypeDefinition.
+        /// </summary>
+        public IEnumerable<string> Categories { get; private set; } = Array.Empty<string>();
+        /// <summary>
+        /// Get the categories as a space separated list
+        /// </summary>
+        public string CategoryNames => string.Join(" ", Categories);
         /// <summary>
         /// Gets the icon name of the ContentType. This value comes from the ContentTypeDefinition.
         /// If that is left empty, the parent value is returned.
@@ -177,6 +211,12 @@ namespace  SenseNet.ContentRepository.Schema
                 return ParentType.AllowIncrementalNaming;
             }
         }
+
+        /// <summary>
+        /// Gets a value that specifies whether this ContentType is system type or not.
+        /// This value comes from the ContentTypeDefinition's &lt;System> element and it is not inherited from the parent.
+        /// </summary>
+        public bool IsSystemType => _isSystemType.HasValue && _isSystemType.Value;
 
         /// <summary>
         /// Gets a value that specifies whether this ContentType allows or disallows preview image generation.
@@ -252,7 +292,7 @@ namespace  SenseNet.ContentRepository.Schema
         }
 
         /// <summary>
-        /// Gets the list of <see cref="FieldSettings"/> instances that represent the Fields element in the ContentTypeDefionition.
+        /// Gets the list of <see cref="FieldSettings"/> instances that represent the Fields element in the ContentTypeDefinition.
         /// </summary>
         public List<FieldSetting> FieldSettings { get; private set; }
         internal int[] FieldBits { get; set; }
@@ -283,7 +323,7 @@ namespace  SenseNet.ContentRepository.Schema
                 }
 
                 return from fs in fsList
-                       where ActiveSchema.NodeTypes[fs.GetType().Name] != null
+                       where StorageSchema.NodeTypes[fs.GetType().Name] != null
                        select new FieldSettingContent(fs.GetEditable(), this) as Node;
             }
         }
@@ -394,6 +434,12 @@ namespace  SenseNet.ContentRepository.Schema
             this.HandlerName = contentTypeElement.GetAttribute("handler", String.Empty);
             this.ParentTypeName = contentTypeElement.GetAttribute("parentType", String.Empty);
 
+            this.IsUnknownHandler = TypeResolver.GetType(this.HandlerName, false) == null;
+            if (this.IsUnknownHandler)
+            {
+                SnLog.WriteWarning($"Unknown content handler {this.HandlerName} for content type {this.Name}.");
+            }
+
             if (this.ParentTypeName.Length == 0)
                 this.ParentTypeName = null;
 
@@ -422,6 +468,13 @@ namespace  SenseNet.ContentRepository.Schema
                     case "AllowedChildTypes":
                         ParseAllowedChildTypes(subElement, nsres);
                         break;
+                    case "Categories":
+                        ParseCategories(subElement, nsres);
+                        break;
+                    case "SystemType":
+                        if (!string.IsNullOrEmpty(subElement.Value) && YES_VALUES.Contains(subElement.Value.Trim().ToLower()))
+                            this._isSystemType = true;
+                        break;
                     case "Preview":
                         if (!string.IsNullOrEmpty(subElement.Value) && YES_VALUES.Contains(subElement.Value.Trim().ToLower()))
                             this._previewEnabled = true;
@@ -442,9 +495,10 @@ namespace  SenseNet.ContentRepository.Schema
             }
         }
 
+
         /// <summary>
         /// Defines a char[] constant that contains all characters that may separate items
-        /// in any ContenTypeDefnition's XmlElemet or XmlAttribute.
+        /// in any ContenTypeDefnition's XmlElement or XmlAttribute.
         /// </summary>
         public static readonly char[] XmlListSeparators = " ,;\t\r\n".ToCharArray();
         private void ParseAllowedChildTypes(XPathNavigator allowedChildTypesElement, IXmlNamespaceResolver nsres)
@@ -464,6 +518,14 @@ namespace  SenseNet.ContentRepository.Schema
                 AllowedChildTypes = new System.Collections.ObjectModel.ReadOnlyCollection<ContentType>(AllowedChildTypeNames.Select(y => contentTypes[y]).ToList());
             }
             CalculateFieldBits(allFieldNames);
+        }
+
+        private void ParseCategories(XPathNavigator categoriesElement, IXmlNamespaceResolver nsres)
+        {
+            Categories = categoriesElement.InnerXml
+                .Split(XmlListSeparators, StringSplitOptions.RemoveEmptyEntries)
+                .Select(x => x.Trim())
+                .ToImmutableArray();
         }
 
         private static readonly int BitsOfInt = (sizeof(int) * 8);
@@ -488,8 +550,32 @@ namespace  SenseNet.ContentRepository.Schema
         {
             foreach (XPathNavigator fieldElement in fieldsElement.SelectChildren(XPathNodeType.Element))
             {
-                FieldDescriptor fieldDescriptor = FieldDescriptor.Parse(fieldElement, nsres, this);
-                
+                FieldDescriptor fieldDescriptor = null;
+
+                try
+                {
+                    fieldDescriptor = FieldDescriptor.Parse(fieldElement, nsres, this);
+                }
+                catch (ContentRegistrationException ex)
+                {
+
+                    this.HasUnknownField = true;
+
+                    // throw registration exceptions only during creation.
+                    if (this.Id < 1)
+                        throw;
+
+                    // continue building the content type when loading it without breaking the whole system
+                    SnLog.WriteWarning(
+                        $"Error during registration of field {ex.FieldName} in content type {this.Name}.",
+                        properties: new Dictionary<string, object>
+                        {
+                            {"FieldXml", fieldElement.OuterXml}
+                        });
+
+                    continue;
+                }
+
                 int fieldIndex = GetFieldSettingIndexByName(fieldDescriptor.FieldName);
                 FieldSetting fieldSetting = fieldIndex < 0 ? null : this.FieldSettings[fieldIndex];
                 if (fieldSetting == null)
@@ -609,11 +695,18 @@ namespace  SenseNet.ContentRepository.Schema
         {
             try
             {
-                SetFieldSlots(TypeResolver.GetType(this.HandlerName));
+                var handlerType = TypeResolver.GetType(this.HandlerName, false);
+                if (handlerType == null)
+                {
+                    SnLog.WriteWarning($"Unknown content handler: {HandlerName}.");
+                    return;
+                }
+
+                SetFieldSlots(handlerType); 
             }
             catch (TypeNotFoundException e)
             {
-                throw new ContentRegistrationException($"An error occured during installing '{this.HandlerName}' ContentType: {e.Message}", e);
+                throw new ContentRegistrationException($"An error occurred during installing '{this.HandlerName}' ContentType: {e.Message}", e);
             }
         }
         private void SetFieldSlots(Type handlerType)
@@ -694,20 +787,31 @@ namespace  SenseNet.ContentRepository.Schema
         internal void Save(bool withInstall)
         {
             if (withInstall)
-                Save();
+                SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
             else
-                base.Save();
+                base.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
         }
+
         /// <summary>
-        /// Persist this Content's changes.
+        /// Persist this ContentType's changes.
         /// The name of the instance and the contained ContentTypeDefinition's name must be the same.
         /// otherwise <see cref="ContentRegistrationException"/> will be thrown.
         /// </summary>
+        [Obsolete("Use async version instead.", true)]
         public override void Save()
+        {
+            SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
+        }
+        /// <summary>
+        /// Asynchronously persist this ContentType's changes.
+        /// The name of the instance and the contained ContentTypeDefinition's name must be the same.
+        /// otherwise <see cref="ContentRegistrationException"/> will be thrown.
+        /// </summary>
+        public override async System.Threading.Tasks.Task SaveAsync(CancellationToken cancel)
         {
             if (!this.Path.StartsWith(Repository.ContentTypesFolderPath))
             {
-                base.Save();
+                await base.SaveAsync(cancel).ConfigureAwait(false);
                 return;
             }
 
@@ -723,7 +827,7 @@ namespace  SenseNet.ContentRepository.Schema
                 long pos = stream.Position;
                 stream.Seek(0, SeekOrigin.Begin);
                 StreamReader reader = new StreamReader(stream);
-                string xml = reader.ReadToEnd();
+                string xml = await reader.ReadToEndAsync();
                 stream.Seek(pos, SeekOrigin.Begin);
                 StringReader sr = new StringReader(xml);
                 XPathDocument xpathDoc = new XPathDocument(sr);
@@ -732,46 +836,84 @@ namespace  SenseNet.ContentRepository.Schema
                 if (name != this.Name)
                     throw new ContentRegistrationException(SR.Exceptions.Registration.Msg_InconsistentContentTypeName, this.Name);
             }
-            ContentTypeManager.ApplyChanges(this);
-            base.Save();
-            ContentTypeManager.Instance.AddContentType(this);
+            ContentTypeManager.ApplyChanges(this, false);
+            await base.SaveAsync(cancel).ConfigureAwait(false);
+            ContentTypeManager.Reset();
         }
+
         /// <summary>
         /// Persist this Content's changes by the given settings.
         /// Do not use this method directly from your code.
         /// </summary>
         /// <param name="settings"><see cref="NodeSaveSettings"/> that contains algorithm of the persistence.</param>
+        [Obsolete("Use async version instead.", true)]
         public override void Save(NodeSaveSettings settings)
         {
-            this.IsSystem = true;
-            base.Save(settings);
+            SaveAsync(settings, CancellationToken.None).GetAwaiter().GetResult();
         }
+        public override async System.Threading.Tasks.Task SaveAsync(NodeSaveSettings settings, CancellationToken cancel)
+        {
+            this.IsSystem = true;
+            await base.SaveAsync(settings, cancel).ConfigureAwait(false);
+        }
+
         /// <summary>
         /// Deletes this <see cref="ContentType"/> and the whole subtree physically.
         /// The operation is forbidden if an instance exists of any of these types.
         /// In this case an <see cref="ApplicationException"/> will be thrown.
         /// </summary>
+        [Obsolete("Use async version instead", true)]
         public override void Delete()
+        {
+            DeleteAsync(CancellationToken.None).ConfigureAwait(false).GetAwaiter().GetResult();
+        }
+        /// <summary>
+        /// Asynchronously deletes this <see cref="ContentType"/> and the whole subtree physically.
+        /// The operation is forbidden if an instance exists of any of these types.
+        /// In this case an <see cref="ApplicationException"/> will be thrown.
+        /// </summary>
+        public override async System.Threading.Tasks.Task DeleteAsync(CancellationToken cancel)
         {
             if (this.Path.StartsWith(Repository.ContentTypesFolderPath))
             {
                 ContentType contentTypeToDelete = ContentTypeManager.Instance.GetContentTypeByName(this.Name);
                 if (contentTypeToDelete != null)
                 {
-                    if (!IsDeletable(contentTypeToDelete))
-                        throw new ApplicationException(String.Concat("Cannot delete ContentType '", this.Name, "' because one or more Content use this type or any descendant type."));
+                    // We must prevent removing the content type from the schema database,
+                    // because this operation is not reversible if the delete operation below fails.
+                    if (!IsDeletable(contentTypeToDelete, out var message))
+                        throw new ApplicationException($"Cannot delete ContentType '{Name}' because {message}.");
                     ContentTypeManager.Instance.RemoveContentType(contentTypeToDelete.Name);
                 }
             }
-            base.Delete();
+
+            DisableObserver(typeof(SharingNodeObserver));
+            DisableObserver(typeof(GroupMembershipObserver));
+            await base.DeleteAsync(cancel);
+            ContentTypeManager.Reset(); // necessary (Delete)
         }
-        private static bool IsDeletable(ContentType contentType)
+        private static bool IsDeletable(ContentType contentType, out string message)
         {
+            message = null;
+
             // Returns false if there is a Node which is inherited from passed ContentType or its descendant.
-            NodeType nodeType = ActiveSchema.NodeTypes[contentType.Name];
+            var nodeType = Providers.Instance.StorageSchema.NodeTypes[contentType.Name];
             if (nodeType == null)
                 return true;
-            return NodeQuery.InstanceCount(nodeType, false) == 0;
+
+            if (Providers.Instance.ContentProtector.GetProtectedPaths().Contains(contentType.Path, StringComparer.OrdinalIgnoreCase))
+            {
+                message = "it is protected";
+                return false;
+            }
+
+            if (NodeQuery.InstanceCount(nodeType, false) > 0)
+            {
+                message = "one or more Content items use this type or any descendant type";
+                return false;
+            }
+
+            return true;
         }
         /// <summary>
         /// Returns true if this <see cref="ContentType"/> is a descendant of the given ContentType.
@@ -854,7 +996,7 @@ namespace  SenseNet.ContentRepository.Schema
                     names.Add(name.ToLower(), name);
                 }
             }
-            foreach (PropertyType propType in ActiveSchema.PropertyTypes)
+            foreach (PropertyType propType in Providers.Instance.StorageSchema.PropertyTypes)
             {
                 string newName;
                 if (names.TryGetValue(propType.Name.ToLower(), out newName))
@@ -951,12 +1093,13 @@ namespace  SenseNet.ContentRepository.Schema
         /// <returns>The <see cref="QueryResult"/> instance.</returns>
         public virtual QueryResult GetChildren(string text, QuerySettings settings, bool getAllChildren)
         {
-            if (SearchManager.ContentQueryIsAllowed)
+            if (Providers.Instance.SearchManager.ContentQueryIsAllowed)
             {
                 var query = ContentQuery.CreateQuery(getAllChildren ? SafeQueries.InTree : SafeQueries.InFolder, settings, this.Path);
                 if (!string.IsNullOrEmpty(text))
                     query.AddClause(text);
-                return query.Execute();
+                return query.ExecuteAsync(CancellationToken.None)
+                    .ConfigureAwait(false).GetAwaiter().GetResult();
             }
             else
             {

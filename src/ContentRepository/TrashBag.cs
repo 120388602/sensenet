@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using SenseNet.Configuration;
 using SenseNet.ContentRepository.Schema;
 using SenseNet.ContentRepository.Storage;
@@ -158,25 +159,39 @@ namespace SenseNet.ContentRepository
         /// <inheritdoc />
         /// <remarks>Cannot be deleted permanently before the minimum retention time - otherwise 
         /// an <see cref="ApplicationException"/> will be thrown.</remarks>
+        [Obsolete("Use async version instead", true)]
         public override void ForceDelete()
+        {
+            ForceDeleteAsync(CancellationToken.None).ConfigureAwait(false).GetAwaiter().GetResult();
+        }
+        /// <inheritdoc />
+        /// <remarks>Cannot be deleted permanently before the minimum retention time - otherwise 
+        /// an <see cref="ApplicationException"/> will be thrown.</remarks>
+        public override async System.Threading.Tasks.Task ForceDeleteAsync(CancellationToken cancel)
         {
             if (!IsPurgeable)
                 throw new ApplicationException("Trashbags cannot be purged before their minimum retention date");
-            base.ForceDelete();
+            await base.ForceDeleteAsync(cancel);
         }
 
         /// <inheritdoc />
+        [Obsolete("Use async version instead", true)]
         public override void Delete()
         {
-            ForceDelete();
+            DeleteAsync(CancellationToken.None).ConfigureAwait(false).GetAwaiter().GetResult();
+        }
+        /// <inheritdoc />
+        public override System.Threading.Tasks.Task DeleteAsync(CancellationToken cancel)
+        {
+            return ForceDeleteAsync(cancel);
         }
 
-        private void Destroy()
+        private async System.Threading.Tasks.Task DestroyAsync(CancellationToken cancel)
         {
             using (new SystemAccount())
             {
                 this.KeepUntil = DateTime.Today.AddDays(-1);
-                this.ForceDelete();    
+                await this.ForceDeleteAsync(cancel);    
             }
         }
 
@@ -196,6 +211,7 @@ namespace SenseNet.ContentRepository
 
             // creating a bag has nothing to do with user permissions: Move will handle that
             TrashBag bag = null;
+            var currentUserId = User.Current.Id;
             var wsId = 0;
             var wsRelativePath = string.Empty;
             var ws = SystemAccount.Execute(() => node.Workspace);
@@ -215,27 +231,43 @@ namespace SenseNet.ContentRepository
                               WorkspaceId = wsId,
                               DisplayName = node.DisplayName,
                               Link = node,
-                              Owner = node.Owner
+                              Owner = node.OwnerId == Identifiers.VisitorUserId ? User.Administrator : node.Owner
                           };
-                bag.Save();
+                bag.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                 CopyPermissions(node, bag);
 
-                // add delete permission for the owner
-                SecurityHandler.CreateAclEditor()
-                    .Allow(bag.Id, node.OwnerId, false, PermissionType.Delete)
-                    .Apply();
+                // Add Delete permission for the owner to let them remove it later and also
+                // AddNew permission to let the move operation below actually move
+                // the content into the TrashBag.
+                Providers.Instance.SecurityHandler.CreateAclEditor()
+                    .Allow(bag.Id, node.OwnerId, false, PermissionType.Delete, PermissionType.AddNew)
+                    .Allow(bag.Id, currentUserId, true, PermissionType.Delete, PermissionType.AddNew)
+                    .ApplyAsync(CancellationToken.None).GetAwaiter().GetResult();
             }
 
             try
             {
                 Node.Move(node.Path, bag.Path);
             }
+            catch (SenseNetSecurityException ex)
+            {
+                SnLog.WriteException(ex);
+
+                bag.DestroyAsync(CancellationToken.None).ConfigureAwait(false).GetAwaiter().GetResult();
+                
+                if (ex.Data.Contains("PermissionType") && (string)ex.Data["PermissionType"] == "Delete")
+                {
+                    throw new InvalidOperationException("You do not have enough permissions to delete this content to the Trash.", ex);
+                }
+
+                throw new InvalidOperationException("Error moving item to the trash", ex);
+            }
             catch(Exception ex)
             {
                 SnLog.WriteException(ex);
 
-                bag.Destroy();
+                bag.DestroyAsync(CancellationToken.None).ConfigureAwait(false).GetAwaiter().GetResult();
 
                 throw new InvalidOperationException("Error moving item to the trash", ex);
             }
@@ -249,19 +281,22 @@ namespace SenseNet.ContentRepository
                 return;
 
             // copy permissions from the source content, without reseting the permission system
-            SecurityHandler.CopyPermissionsFrom(source.Id, target.Id, CopyPermissionMode.BreakAndClear);
+            Providers.Instance.SecurityHandler.CopyPermissionsFromAsync(source.Id, target.Id, CopyPermissionMode.BreakAndClear,
+                CancellationToken.None).GetAwaiter().GetResult();
 
             // If there were any permission settings for the Creators group on the source content, we 
             // need to place an explicite entry with the same permissions onto the target for the creator 
             // user, as the creator of the trashbag (the user who deletes the content) may be different 
             // than the creator of the original document.
-            var aces = SecurityHandler.GetEffectiveEntriesAsSystemUser(source.Id, new[] { Identifiers.OwnersGroupId }, EntryType.Normal);
+            var aces = Providers.Instance.SecurityHandler.GetEffectiveEntriesAsSystemUser(source.Id, new[] { Identifiers.OwnersGroupId }, EntryType.Normal);
             foreach (var ace in aces)
-                SecurityHandler.CreateAclEditor().Set(target.Id, ace.IdentityId, ace.LocalOnly, ace.AllowBits, ace.DenyBits);
+                Providers.Instance.SecurityHandler.CreateAclEditor()
+                    .Set(target.Id, ace.IdentityId, ace.LocalOnly, ace.AllowBits, ace.DenyBits);
 
-            aces = SecurityHandler.GetEffectiveEntriesAsSystemUser(source.Id, new[] { Identifiers.OwnersGroupId }, EntryType.Sharing);
+            aces = Providers.Instance.SecurityHandler.GetEffectiveEntriesAsSystemUser(source.Id, new[] { Identifiers.OwnersGroupId }, EntryType.Sharing);
             foreach (var ace in aces)
-                SnAclEditor.Create(SecurityHandler.SecurityContext, EntryType.Sharing).Set(target.Id, ace.IdentityId, ace.LocalOnly, ace.AllowBits, ace.DenyBits);
+                SnAclEditor.Create(Providers.Instance.SecurityHandler.SecurityContext, EntryType.Sharing)
+                    .Set(target.Id, ace.IdentityId, ace.LocalOnly, ace.AllowBits, ace.DenyBits);
         }
 
 
@@ -289,8 +324,8 @@ namespace SenseNet.ContentRepository
             {
                 if (_resolved)
                     return _originalContent;
-                 _originalContent = Link as GenericContent;
-                 _resolved = true;
+                _originalContent = Link as GenericContent;
+                _resolved = true;
                 return _originalContent;
             }
         }

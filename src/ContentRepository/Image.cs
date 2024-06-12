@@ -7,7 +7,9 @@ using SenseNet.ContentRepository.Schema;
 using SenseNet.ContentRepository.Storage;
 using SenseNet.Diagnostics;
 using System.Collections.Generic;
+using System.Threading;
 using SenseNet.ContentRepository.Storage.Events;
+using SkiaSharp;
 
 
 namespace SenseNet.ContentRepository
@@ -84,36 +86,38 @@ namespace SenseNet.ContentRepository
         // ================================================================================= Methods
 
         /// <summary>
-        /// Returns an <see cref="System.Drawing.Imaging.ImageFormat"/> value converted from the given string value.
+        /// Returns an <see cref="SKEncodedImageFormat"/> value converted from the given string value.
         /// Note that "gif" is converted to ImageFormat.Png.
         /// </summary>
         /// <param name="contentType">String representation of an image format (e.g. png, jpeg) or an image file name.</param>
-        public static System.Drawing.Imaging.ImageFormat getImageFormat(string contentType)
+        public static SKEncodedImageFormat getImageFormat(string contentType)
         {
             var lowerContentType = contentType.ToLower();
 
             if (lowerContentType.EndsWith("png"))
-                return System.Drawing.Imaging.ImageFormat.Png;
+                return SKEncodedImageFormat.Png;
             if (lowerContentType.EndsWith("bmp"))
-                return System.Drawing.Imaging.ImageFormat.Bmp;
+                return SKEncodedImageFormat.Bmp;
             if (lowerContentType.EndsWith("jpeg"))
-                return System.Drawing.Imaging.ImageFormat.Jpeg;
+                return SKEncodedImageFormat.Jpeg;
             if (lowerContentType.EndsWith("jpg"))
-                return System.Drawing.Imaging.ImageFormat.Jpeg;
+                return SKEncodedImageFormat.Jpeg;
 
             // gif -> png! resizing gif with gif imageformat ruins alpha values, therefore we return with png
             if (lowerContentType.EndsWith("gif"))
-                return System.Drawing.Imaging.ImageFormat.Png;
-            if (lowerContentType.EndsWith("tiff"))
-                return System.Drawing.Imaging.ImageFormat.Tiff;
-            if (lowerContentType.EndsWith("wmf"))
-                return System.Drawing.Imaging.ImageFormat.Wmf;
-            if (lowerContentType.EndsWith("emf"))
-                return System.Drawing.Imaging.ImageFormat.Emf;
-            if (lowerContentType.EndsWith("exif"))
-                return System.Drawing.Imaging.ImageFormat.Exif;
+                return SKEncodedImageFormat.Png;
+            // ---- These are not supported in SkiaSharp.
+            // (see for tiff support: https://stackoverflow.com/questions/50312937/skiasharp-tiff-support)
+            //if (lowerContentType.EndsWith("tiff"))
+            //    return SKEncodedImageFormat.Tiff;
+            //if (lowerContentType.EndsWith("wmf"))
+            //    return SKEncodedImageFormat.Wmf;
+            //if (lowerContentType.EndsWith("emf"))
+            //    return SKEncodedImageFormat.Emf;
+            //if (lowerContentType.EndsWith("exif"))
+            //    return SKEncodedImageFormat.Exif;
 
-            return System.Drawing.Imaging.ImageFormat.Jpeg;
+            return SKEncodedImageFormat.Jpeg;
         }
         /// <summary>
         /// Returns a new <see cref="Image"/> instance created from the given <see cref="BinaryData"/> 
@@ -196,7 +200,7 @@ namespace SenseNet.ContentRepository
                     // set reference
                     var result = imageField.SetThumbnailReference(image);
                     if (result)
-                        content.Save();
+                        content.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                 }
             }
             base.OnCreated(sender, e);
@@ -204,7 +208,7 @@ namespace SenseNet.ContentRepository
             // refresh image width/height than save the content again
             if (MustRefreshDimensions(image, e))
             {
-                image.Save(SavingMode.KeepVersion);
+                image.SaveAsync(SavingMode.KeepVersion, CancellationToken.None).GetAwaiter().GetResult();
             }
         }
         /// <summary>
@@ -246,7 +250,7 @@ namespace SenseNet.ContentRepository
             // refresh image width/height than save the content again
             if (MustRefreshDimensions(image, e))
             {
-                image.Save(SavingMode.KeepVersion);
+                image.SaveAsync(SavingMode.KeepVersion, CancellationToken.None).GetAwaiter().GetResult();
             }
         }
         /// <summary>
@@ -274,7 +278,7 @@ namespace SenseNet.ContentRepository
             }
         }
 
-        /// <inheritdoc />
+        [Obsolete("Use async version instead.", true)]
         public override void FinalizeContent()
         {
             base.FinalizeContent();
@@ -282,6 +286,14 @@ namespace SenseNet.ContentRepository
             // refresh image width/height than save the content again
             if (SetDimension(this))
                 this.Save(SavingMode.KeepVersion);
+        }
+        public override async System.Threading.Tasks.Task FinalizeContentAsync(CancellationToken cancel)
+        {
+            await base.FinalizeContentAsync(cancel).ConfigureAwait(false);
+
+            // refresh image width/height than save the content again
+            if (SetDimension(this))
+                await this.SaveAsync(SavingMode.KeepVersion, cancel).ConfigureAwait(false);
         }
 
         /// <inheritdoc />
@@ -329,14 +341,14 @@ namespace SenseNet.ContentRepository
                 var imgStream = imgNode.Binary.GetStream();
                 if (imgStream != null && imgStream.Length > 0)
                 {
-                    using (var img = System.Drawing.Image.FromStream(imgStream))
+                    using (var bitmap = SKBitmap.Decode(imgStream))
                     {
                         // if there is no need to modify the image, return false
-                        if (originalWidth == img.Width && originalHeight == img.Height)
+                        if (originalWidth == bitmap.Width && originalHeight == bitmap.Height)
                             return false;
 
-                        imgNode.Width = img.Width;
-                        imgNode.Height = img.Height;
+                        imgNode.Width = bitmap.Width;
+                        imgNode.Height = bitmap.Height;
                     }
                 }
             }
@@ -379,9 +391,11 @@ namespace SenseNet.ContentRepository
 
             object widthParam = null;
             object heightParam = null;
+            object watermarkParam = null;
 
             parameters?.TryGetValue("width", out widthParam);
             parameters?.TryGetValue("height", out heightParam);
+            parameters?.TryGetValue("watermark", out watermarkParam);
 
             var binaryData = !string.IsNullOrEmpty(propertyName) ? GetBinary(propertyName) : Binary;
 
@@ -392,9 +406,20 @@ namespace SenseNet.ContentRepository
 
             if (DocumentPreviewProvider.Current != null && DocumentPreviewProvider.Current.IsPreviewOrThumbnailImage(NodeHead.Get(Id)))
             {
+                var options = new PreviewImageOptions
+                {
+                    BinaryFieldName = propertyName
+                };
+
+                if (watermarkParam != null && 
+                    ((int.TryParse((string) watermarkParam, out var wmValue) && wmValue == 1) ||
+                     (bool.TryParse((string) watermarkParam, out var wmBool) && wmBool)))
+                {
+                    options.RestrictionType = RestrictionType.Watermark;
+                }
+
                 // get preview image with watermark or redaction if necessary
-                imageStream = DocumentPreviewProvider.Current.GetRestrictedImage(this,
-                    new PreviewImageOptions {BinaryFieldName = propertyName});
+                imageStream = DocumentPreviewProvider.Current.GetRestrictedImage(this, options);
             }
             else
             {

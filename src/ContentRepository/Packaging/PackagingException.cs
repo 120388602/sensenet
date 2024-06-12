@@ -18,7 +18,10 @@ namespace SenseNet.Packaging
         DependencyVersion, DependencyMinimumVersion, DependencyMaximumVersion,
         InvalidPhase,
         // parameters
-        MissingParameterName, InvalidParameterName, DuplicatedParameter
+        MissingParameterName, InvalidParameterName, DuplicatedParameter,
+        // others
+        InvalidInterval, MaxLessThanMin, SourceVersionsAreTheSame, TargetVersionsAreTheSame, OverlappedIntervals,
+        PatchIdAndDependencyIdAreTheSame
     }
 
     [Serializable]
@@ -40,6 +43,7 @@ namespace SenseNet.Packaging
         private void Initialize(int eventId, PackagingExceptionType errorType)
         {
             this.Data.Add("EventId", eventId);
+            this.Data.Add("ErrorType", errorType.ToString());
             this.ErrorType = errorType;
         }
     }

@@ -4,6 +4,7 @@ using SenseNet.ContentRepository.Storage;
 using SenseNet.Search;
 using SenseNet.ContentRepository.Storage.Data;
 using SenseNet.Configuration;
+using SenseNet.Diagnostics;
 
 namespace SenseNet.Tests
 {
@@ -53,17 +54,24 @@ namespace SenseNet.Tests
             }
         }
 
-        public class DataProviderSwindler : IDisposable
+        public class LoggerSwindler<T> : IDisposable where T : class, IEventLogger
         {
-            readonly DataProvider _providerInstanceBackup;
-            public DataProviderSwindler(DataProvider providerInstance)
+            private readonly IEventLogger _originalLogger;
+            public T Logger => SnLog.Instance as T;
+
+            public LoggerSwindler()
             {
-                _providerInstanceBackup = Providers.Instance.DataProvider;
-                Providers.Instance.DataProvider = providerInstance;
+                _originalLogger = SnLog.Instance;
+                SnLog.Instance = Activator.CreateInstance<T>();
+            }
+            public LoggerSwindler(IEventLogger logger)
+            {
+                _originalLogger = SnLog.Instance;
+                SnLog.Instance = logger;
             }
             public void Dispose()
             {
-                Providers.Instance.DataProvider = _providerInstanceBackup;
+                SnLog.Instance = _originalLogger;
             }
         }
     }

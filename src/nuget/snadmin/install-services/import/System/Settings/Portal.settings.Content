@@ -1,11 +1,17 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <ContentMetaData>
-  <ContentType>PortalSettings</ContentType>
+  <ContentType>Settings</ContentType>
   <ContentName>Portal.settings</ContentName>
   <Fields>
     <Binary attachment="Portal.settings" />
+    <GlobalOnly>true</GlobalOnly>
+    <Index>140</Index>
   </Fields>
   <Permissions>
     <Clear />
+    <Identity path="/Root/IMS/Public/Administrators">
+      <Open>Allow</Open>
+      <Save>Allow</Save>
+    </Identity>
   </Permissions>
 </ContentMetaData>

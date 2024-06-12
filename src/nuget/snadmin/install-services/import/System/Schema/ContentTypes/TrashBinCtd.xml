@@ -2,10 +2,12 @@
 <ContentType name="TrashBin" parentType="Workspace" handler="SenseNet.ContentRepository.TrashBin" xmlns="http://schemas.sensenet.com/SenseNet/ContentRepository/ContentTypeDefinition">
   <DisplayName>$Ctd-TrashBin,DisplayName</DisplayName>
   <Description>$Ctd-TrashBin,Description</Description>
-  <Icon>trash</Icon>
+  <Icon>TrashBin</Icon>
   <AllowedChildTypes>
     TrashBag
   </AllowedChildTypes>
+  <Categories>HideByDefault</Categories>
+  <SystemType>true</SystemType>
   <Fields>
     <Field name="Name" type="ShortText">
       <Configuration>
@@ -21,7 +23,7 @@
         <VisibleNew>Hide</VisibleNew>
       </Configuration>
     </Field>
-    <Field name="Description" type="LongText">
+    <Field name="Description" type="RichText">
       <Configuration>
         <VisibleBrowse>Hide</VisibleBrowse>
         <VisibleEdit>Hide</VisibleEdit>
@@ -52,6 +54,9 @@
     <Field name="IsActive" type="Boolean">
       <DisplayName>$Ctd-TrashBin,IsActive-DisplayName</DisplayName>
       <Description>$Ctd-TrashBin,IsActive-Description</Description>
+      <Configuration>
+        <VisibleEdit>Show</VisibleEdit>
+      </Configuration>
     </Field>
     <Field name="MinRetentionTime" type="Integer">
       <DisplayName>$Ctd-TrashBin,MinRetentionTime-DisplayName</DisplayName>

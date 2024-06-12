@@ -1,11 +1,17 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.Linq;
 using System.Text;
 using SenseNet.ContentRepository.Storage.Schema;
 using System.Diagnostics;
 using System.Globalization;
+using System.IO;
 using System.Threading;
+using System.Threading.Tasks;
+using SenseNet.Configuration;
+using SenseNet.ContentRepository.Storage.Data;
+using SenseNet.ContentRepository.Storage.DataModel;
 using SenseNet.ContentRepository.Storage.Security;
 using SenseNet.Diagnostics;
 
@@ -29,6 +35,9 @@ namespace SenseNet.ContentRepository.Storage
 
     public class NodeData
     {
+        private IDataStore DataStore => Providers.Instance.DataStore;
+        private StorageSchema StorageSchema => Providers.Instance.StorageSchema;
+
         private Stopwatch _savingTimer;
 
         internal Stopwatch SavingTimer
@@ -67,6 +76,102 @@ namespace SenseNet.ContentRepository.Storage
         private object[] staticData;
         private bool[] staticDataIsModified;
         private Dictionary<int, object> dynamicData;
+
+        // ----------------------------------------------------------- Storage models
+
+        internal virtual NodeHeadData GetNodeHeadData()
+        {
+            var nodeHead = NodeHead.Get(Id);
+            
+            return new NodeHeadData
+            {
+                NodeId = Id,
+                NodeTypeId = NodeTypeId,
+                ContentListTypeId = ContentListTypeId,
+                ContentListId = ContentListId,
+                CreatingInProgress = CreatingInProgress,
+                IsDeleted = IsDeleted,
+                ParentNodeId = ParentId,
+                Name = Name,
+                DisplayName = DisplayName,
+                Path = Path,
+                Index = Index,
+                Locked = Locked,
+                LockedById = LockedById,
+                ETag = ETag,
+                LockType = LockType,
+                LockTimeout = LockTimeout,
+                LockDate = LockDate,
+                LockToken = LockToken,
+                LastLockUpdate = LastLockUpdate,
+                LastMinorVersionId = nodeHead?.LastMinorVersionId ?? 0,
+                LastMajorVersionId = nodeHead?.LastMajorVersionId ?? 0,
+                CreationDate = CreationDate,
+                CreatedById = CreatedById,
+                ModificationDate = ModificationDate,
+                ModifiedById = ModifiedById,
+                IsSystem = IsSystem,
+                OwnerId = OwnerId,
+                SavingState = SavingState,
+                Timestamp = NodeTimestamp,
+            };
+        }
+        internal VersionData GetVersionData()
+        {
+            return new VersionData
+            {
+                VersionId = VersionId,
+                NodeId = Id,
+                Version = Version,
+                CreationDate = VersionCreationDate,
+                CreatedById = VersionCreatedById,
+                ModificationDate = VersionModificationDate,
+                ModifiedById = VersionModifiedById,
+                ChangedData = ChangedData,
+                Timestamp = VersionTimestamp,
+            };
+        }
+        internal DynamicPropertyData GetDynamicData(bool allBinaries)
+        {
+            lock (_readPropertySync)
+            {
+                var changedPropertyTypes = dynamicData.Keys.Select(x => StorageSchema.PropertyTypes.GetItemById(x)).ToArray();
+                var binaryTypes =
+                    (allBinaries ? (IEnumerable<PropertyType>) PropertyTypes : changedPropertyTypes)
+                    .Where(pt => pt.DataType == DataType.Binary).ToArray();
+                return new DynamicPropertyData
+                {
+                    VersionId = VersionId,
+                    PropertyTypes = PropertyTypes.ToList(),
+                    DynamicProperties = PropertyTypes
+                        .Where(pt => !pt.IsContentListProperty && pt.DataType != DataType.Binary && pt.DataType != DataType.Reference && pt.DataType != DataType.Text)
+                        .ToDictionary(pt => pt, pt => GetDynamicPropertyValueSafe(pt) ?? pt.DefaultValue),
+                    ContentListProperties = PropertyTypes
+                        .Where(pt => pt.IsContentListProperty && pt.DataType != DataType.Binary && pt.DataType != DataType.Reference && pt.DataType != DataType.Text)
+                        .ToDictionary(pt => pt, pt => GetDynamicPropertyValueSafe(pt) ?? pt.DefaultValue),
+                    BinaryProperties = binaryTypes
+                        .ToDictionary(pt => pt, pt => (BinaryDataValue)GetDynamicRawData(pt)),
+                    ReferenceProperties = changedPropertyTypes
+                        .Where(pt => pt.DataType == DataType.Reference)
+                        .ToDictionary(pt => pt, pt => (List<int>)dynamicData[pt.Id]),
+                    LongTextProperties = changedPropertyTypes
+                        .Where(pt => pt.DataType == DataType.Text)
+                        .ToDictionary(pt => pt, pt => dynamicData[pt.Id]?.ToString())
+                };
+            }
+        }
+
+        public IDictionary<string, object> GetDynamicDataNameKey()
+        {
+            lock (_readPropertySync)
+                return new ReadOnlyDictionary<string, object>(
+                    dynamicData.ToDictionary(x => StorageSchema.PropertyTypes[x.Key].Name, x => x.Value));
+        }
+        public IDictionary<int, object> GetDynamicDataIdKey()
+        {
+            lock (_readPropertySync)
+                return new ReadOnlyDictionary<int, object>(dynamicData);
+        }
 
         internal TypeCollection<PropertyType> PropertyTypes { get; private set; }
         private int[] TextPropertyIds { get; set; }
@@ -113,7 +218,7 @@ namespace SenseNet.ContentRepository.Storage
                 var sharedDynamicData = this._sharedData.dynamicData;
                 foreach (var propId in dynamicData.Keys)
                 {
-                    var propType = ActiveSchema.PropertyTypes.GetItemById(propId);
+                    var propType = StorageSchema.PropertyTypes.GetItemById(propId);
                     var origData = sharedDynamicData[propId];
                     var privData = dynamicData[propId];
                     if (RelevantChange(origData, privData, propType.DataType))
@@ -148,13 +253,15 @@ namespace SenseNet.ContentRepository.Storage
         }
 
         public NodeData(int nodeTypeId, int contentListTypeId)
-            : this(NodeTypeManager.Current.NodeTypes.GetItemById(nodeTypeId), NodeTypeManager.Current.ContentListTypes.GetItemById(contentListTypeId)) { }
+            : this(Providers.Instance.StorageSchema.NodeTypes.GetItemById(nodeTypeId),
+                Providers.Instance.StorageSchema.ContentListTypes.GetItemById(contentListTypeId)) { }
         public NodeData(NodeType nodeType, ContentListType contentListType)
         {
             staticDataIsModified = new bool[StaticDataSlotCount];
             staticData = new object[StaticDataSlotCount];
+            NodeTypeId = nodeType.Id;
 
-            PropertyTypes = NodeTypeManager.GetDynamicSignature(nodeType.Id, contentListType == null ? 0 : contentListType.Id);
+            PropertyTypes = StorageSchema.GetDynamicSignature(nodeType.Id, contentListType?.Id ?? 0);
             TextPropertyIds = PropertyTypes.Where(p => p.DataType == DataType.Text).Select(p => p.Id).ToArray();
 
             dynamicData = new Dictionary<int, object>();
@@ -425,6 +532,29 @@ namespace SenseNet.ContentRepository.Storage
 
         // =========================================================== Dynamic raw data accessors
 
+        private object GetDynamicPropertyValueSafe(PropertyType propertyType)
+        {
+            var id = propertyType.Id;
+            object value;
+
+            // if modified
+            if (dynamicData.TryGetValue(id, out value))
+                return value;
+
+            if (SharedData != null)
+            {
+                // if loaded
+                if (SharedData.dynamicData.TryGetValue(id, out value))
+                    return value;
+                return SharedData.LoadProperty(propertyType);
+            }
+
+            if (this.IsShared)
+                return LoadProperty(propertyType);
+
+            return null;
+        }
+
         internal object GetDynamicRawData(int propertyTypeId)
         {
             var propType = this.PropertyTypes.GetItemById(propertyTypeId);
@@ -542,7 +672,7 @@ namespace SenseNet.ContentRepository.Storage
             if (Enum.TryParse<StaticDataSlot>(propertyName, out slot))
                 return staticDataIsModified[(int)slot];
 
-            var propType = ActiveSchema.PropertyTypes[propertyName];
+            var propType = StorageSchema.PropertyTypes[propertyName];
             if (propType == null)
                 throw Exception_PropertyNotFound(propertyName);
 
@@ -638,7 +768,7 @@ namespace SenseNet.ContentRepository.Storage
             return false;
         }
 
-        private object LoadProperty(PropertyType propertyType)
+        private object LoadProperty(PropertyType propertyType) //UNDONE:x: rewrite to async (CRUD save)
         {
             var propId = propertyType.Id;
             lock (_readPropertySync)
@@ -648,21 +778,29 @@ namespace SenseNet.ContentRepository.Storage
             }
 
             object data;
-            if (propertyType.DataType == DataType.Text)
+            // ReSharper disable once SwitchStatementMissingSomeCases
+            switch (propertyType.DataType)
             {
-                PreloadTextProperties();
-                lock (_readPropertySync)
-                    return  (dynamicData.TryGetValue(propId, out data)) ? data : null;
+                case DataType.Text:
+                    PreloadTextPropertiesAsync(CancellationToken.None).GetAwaiter().GetResult();
+                    lock (_readPropertySync)
+                        return  (dynamicData.TryGetValue(propId, out data)) ? data : null;
+                case DataType.Binary:
+                    data = DataStore.LoadBinaryPropertyValueAsync(this.VersionId, propertyType.Id, CancellationToken.None)
+                        .GetAwaiter().GetResult();
+                    break;
+                default:
+                    data = propertyType.DefaultValue;
+                    break;
             }
 
-            data = DataBackingStore.LoadProperty(this.VersionId, propertyType);
             lock (_readPropertySync)
                 dynamicData[propId] = data;
             return data;
         }
 
-        /// <summary>Preloads all uncached text properties to avoid more than one database access.</summary>
-        internal void PreloadTextProperties()
+        /// <summary>Loads all uncached text properties to avoid more than one database access.</summary>
+        internal async Task PreloadTextPropertiesAsync(CancellationToken cancel)
         {
             if (Id == 0)
                 return;
@@ -670,17 +808,24 @@ namespace SenseNet.ContentRepository.Storage
             if (!this.IsShared)
             {
                 if (this.SharedData != null)
-                    this.SharedData.PreloadTextProperties();
+                    await this.SharedData.PreloadTextPropertiesAsync(cancel).ConfigureAwait(false);
                 return;
             }
 
-            var notLoadedTextPropertyTypeIds = this.TextPropertyIds.Where(p => !dynamicData.ContainsKey(p)).ToArray();
-            var data = DataBackingStore.LoadTextProperties(this.VersionId, notLoadedTextPropertyTypeIds);
-            foreach (var id in notLoadedTextPropertyTypeIds)
+            var notLoadedTextPropertyTypeIds = TextPropertyIds.Where(p => !dynamicData.ContainsKey(p)).ToArray();
+            var data = await DataStore.LoadTextPropertyValuesAsync(VersionId, notLoadedTextPropertyTypeIds, cancel)
+                .ConfigureAwait(false);
+
+            if (notLoadedTextPropertyTypeIds.Length > 0)
             {
-                string value = null;
-                data.TryGetValue(id, out value);
-                dynamicData[id] = value;
+                lock (_readPropertySync)
+                {
+                    foreach (var id in notLoadedTextPropertyTypeIds)
+                    {
+                        data.TryGetValue(id, out var value);
+                        dynamicData[id] = value;
+                    }
+                }
             }
         }
 
@@ -730,7 +875,7 @@ namespace SenseNet.ContentRepository.Storage
             {
                 foreach (var propTypeId in dynamicData.Keys.ToArray())
                 {
-                    var propType = ActiveSchema.PropertyTypes.GetItemById(propTypeId);
+                    var propType = StorageSchema.PropertyTypes.GetItemById(propTypeId);
                     if (propType != null)
                     {
                         if (propType.DataType == DataType.Binary)
@@ -742,7 +887,8 @@ namespace SenseNet.ContentRepository.Storage
                         if (propType.DataType == DataType.Text)
                         {
                             var item = dynamicData[propTypeId] as string;
-                            if (!SenseNet.ContentRepository.Storage.Data.DataProvider.Current.IsCacheableText(item))
+                            var isCacheable = DataStore.IsCacheableText(item);
+                            if (!isCacheable)
                                 dynamicData.Remove(propTypeId);
                         }
                     }
@@ -796,67 +942,20 @@ namespace SenseNet.ContentRepository.Storage
         internal static Exception Exception_PropertyNotFound(string name, string typeName)
         {
             var tn = string.IsNullOrEmpty(typeName) ? string.Empty : ". Content type name: " + typeName;
-            var propType = NodeTypeManager.Current.PropertyTypes[name];
+            var propType = Providers.Instance.StorageSchema.PropertyTypes[name];
             if (propType == null)
                 return new ApplicationException("PropertyType not found. Name: " + name + tn);
             return new ApplicationException(String.Concat("Unknown property. Id: ", propType.Id, ", Name: ", name, tn));
         }
         internal static Exception Exception_PropertyNotFound(int propTypeId)
         {
-            var propType = NodeTypeManager.Current.PropertyTypes.GetItemById(propTypeId);
+            var propType = Providers.Instance.StorageSchema.PropertyTypes.GetItemById(propTypeId);
             if (propType == null)
                 return new ApplicationException("PropertyType not found. Id: " + propTypeId);
             return new ApplicationException(String.Concat("Unknown property. Id: ", propType.Id, ", Name: ", propType.Name));
         }
 
-        // ---------------------------------------------------------- transaction
-
-        private SnapshotData _snapshotData;
-        internal void CreateSnapshotData()
-        {
-            var binIds = new Dictionary<int, Tuple<int, int>>();
-            foreach (var propType in PropertyTypes)
-            {
-                if (propType.DataType == DataType.Binary)
-                {
-                    var binValue = GetDynamicRawData(propType) as BinaryDataValue;
-                    if (binValue != null)
-                        binIds.Add(propType.Id, new Tuple<int, int>(binValue.Id, binValue.FileId));
-                }
-            }
-            _snapshotData = new SnapshotData
-            {
-                Id = this.Id,
-                Path = this.Path,
-                NodeTimestamp = this.NodeTimestamp,
-                VersionId = this.VersionId,
-                Version = this.Version,
-                VersionTimestamp = this.VersionTimestamp,
-                BinaryIds = binIds
-            };
-        }
-        internal void Rollback()
-        {
-            if (IsShared)
-                throw Exception_SharedIsReadOnly();
-
-            this.Id = _snapshotData.Id;
-            this.Path = _snapshotData.Path;
-            this.NodeTimestamp = _snapshotData.NodeTimestamp;
-            this.VersionId = _snapshotData.VersionId;
-            this.Version = _snapshotData.Version;
-            this.VersionTimestamp = _snapshotData.VersionTimestamp;
-            foreach (var propTypeId in _snapshotData.BinaryIds.Keys)
-            {
-                var binValue = GetDynamicRawData(propTypeId) as BinaryDataValue;
-                if (binValue != null)
-                {
-                    var item = _snapshotData.BinaryIds[propTypeId];
-                    binValue.Id = item.Item1;
-                    binValue.FileId = item.Item2;
-                }
-            }
-        }
+        // ---------------------------------------------------------- differences
 
         internal IEnumerable<ChangedData> GetChangedValues()
         {
@@ -885,7 +984,7 @@ namespace SenseNet.ContentRepository.Storage
             var sharedDynamicData = this._sharedData.dynamicData;
             foreach (var propId in dynamicData.Keys)
             {
-                var propType = ActiveSchema.PropertyTypes.GetItemById(propId);
+                var propType = StorageSchema.PropertyTypes.GetItemById(propId);
                 var origData = sharedDynamicData[propId];
                 var privData = dynamicData[propId];
                 if (RelevantChange(origData, privData, propType.DataType))
@@ -964,7 +1063,7 @@ namespace SenseNet.ContentRepository.Storage
 
             foreach (var key in dynamicData.Keys)
             {
-                var propType = ActiveSchema.PropertyTypes.GetItemById(key);
+                var propType = StorageSchema.PropertyTypes.GetItemById(key);
                 if (propType != null)
                     values.Add(propType.Name.Replace("#", "_"), FormatDynamicData(dynamicData[key] ?? string.Empty, propType.DataType));
             }
@@ -1086,7 +1185,7 @@ namespace SenseNet.ContentRepository.Storage
         }
         private string FormatNodeType(int id)
         {
-            var nt = ActiveSchema.NodeTypes.GetItemById(id);
+            var nt = StorageSchema.NodeTypes.GetItemById(id);
             if (nt == null)
                 return string.Empty;
             return nt.Name;
@@ -1254,6 +1353,19 @@ namespace SenseNet.ContentRepository.Storage
         protected virtual void PropertyChanged(string propertyName)
         {
             PropertyChangedCallback?.Invoke(propertyName);
+        }
+
+        /// <summary>
+        /// Use only test purposes.
+        /// </summary>
+        /// <param name="target"></param>
+        internal void CopyData(NodeData target)
+        {
+            target._isShared = _isShared;
+            target._sharedData = _sharedData;
+            target.staticData = staticData;
+            target.staticDataIsModified = staticDataIsModified;
+            target.dynamicData = dynamicData;
         }
     }
 }

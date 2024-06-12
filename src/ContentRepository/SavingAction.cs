@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using SenseNet.Configuration;
 using SenseNet.ContentRepository.Storage;
 using SenseNet.ContentRepository.Versioning;
@@ -12,7 +13,7 @@ namespace SenseNet.ContentRepository
 {
     public class SavingAction : NodeSaveSettings
     {
-        private static readonly string[] VERSIONING_ACTIONS = new[] { "checkin", "checkout", "undocheckout", "forceundocheckout", "publish", "approve", "reject" };
+        internal static readonly string[] VERSIONING_ACTIONS = new[] { "checkin", "checkout", "undocheckout", "forceundocheckout", "publish", "approve", "reject" };
 
         public static SavingAction Create(Node node)
         {
@@ -403,20 +404,18 @@ namespace SenseNet.ContentRepository
             this.LockerUserId = User.Current.Id;
         }
 
+        [Obsolete("Use async version instead.", true)]
         public void Execute()
+        {
+            ExecuteAsync(CancellationToken.None).GetAwaiter().GetResult();
+        }
+        public async System.Threading.Tasks.Task ExecuteAsync(CancellationToken cancel)
         {
             if (this.Node.IsNew)
             {
-                var gc = Node.Parent as GenericContent;
-                if (gc != null)
+                if (Node.Parent is GenericContent gc)
                     gc.AssertAllowedChildType(Node);
             }
-
-            // Assert SharedLock
-            //UNDONE: uncomment when SharedLock storage is implemented
-            //if (null != SharedLock.GetLock(this.Node.Id))
-            //    throw new InvalidContentActionException(InvalidContentActionReason.CheckedOutToSomeoneElse,
-            //        this.Node.Path);
 
             ContentNamingProvider.ValidateName(this.Node.Name);
 
@@ -430,16 +429,23 @@ namespace SenseNet.ContentRepository
             {
                 try
                 {
-                    Node.Save(this);
+                    await Node.SaveAsync(this, CancellationToken.None).ConfigureAwait(false);
                     break;
+                }
+                catch (AggregateException ae)
+                {
+                    if (!autoNamingAllowed)
+                        throw;
+                    if (!(ae.InnerException is Storage.Data.NodeAlreadyExistsException))
+                        throw;
                 }
                 catch (Storage.Data.NodeAlreadyExistsException)
                 {
                     if (!autoNamingAllowed)
                         throw;
-
-                    this.Node.Name = ContentNamingProvider.IncrementNameSuffixToLastName(Node.Name, Node.ParentId);
                 }
+
+                this.Node.Name = ContentNamingProvider.IncrementNameSuffixToLastName(Node.Name, Node.ParentId);
             }
         }
 
@@ -852,19 +858,56 @@ namespace SenseNet.ContentRepository
             }
         }
 
+        /// <summary>
+        /// Determines if the provided versioning or approving action
+        /// is valid for the content based on its state and the
+        /// permissions of the current user.
+        /// </summary>
+        public static bool IsValidVersioningAction(Node node, string actionName)
+        {
+            if (string.IsNullOrEmpty(actionName) || node == null || !(node is GenericContent generic))
+                return true;
+            
+            actionName = actionName.ToLower();
+
+            return actionName switch
+            {
+                "checkin" => HasCheckIn(generic),
+                "checkout" => !generic.IsHeadOnly &&
+                               (generic.VersioningMode > VersioningType.None || 
+                               generic is IFile || 
+                               generic.NodeType.IsInstaceOfOrDerivedFrom("Page")) && 
+                              HasCheckOut(generic),
+                "undocheckout" => HasUndoCheckOut(generic),
+                "forceundocheckout" => HasForceUndoCheckOutRight(generic),
+                "publish" => !generic.IsHeadOnly && 
+                              generic.VersioningMode > VersioningType.None && 
+                              HasPublish(generic),
+                "approve" => generic.Approvable,
+                "reject" => generic.Approvable,
+                _ => true
+            };
+        }
+
         public static bool HasCheckIn(Node node)
         {
+            if (node == null || node.IsHeadOnly)
+                return false;
+
             var s = SavingAction.Create(node);
             return s.ValidateAction(StateAction.CheckIn) == ActionValidationResult.Valid;
         }
         public static bool HasCheckOut(GenericContent node)
         {
+            if (node == null || node.IsHeadOnly)
+                return false;
+
             var s = SavingAction.Create(node);
             return s.ValidateAction(StateAction.CheckOut) == ActionValidationResult.Valid;
         }
         public static bool HasUndoCheckOut(GenericContent node)
         {
-            if (HasForceUndoCheckOutRight(node))
+            if (node == null || node.IsHeadOnly || HasForceUndoCheckOutRight(node))
                 return false;
 
             var s = SavingAction.Create(node);
@@ -872,21 +915,33 @@ namespace SenseNet.ContentRepository
         }
         public static bool HasSave(GenericContent node)
         {
+            if (node == null || node.IsHeadOnly)
+                return false;
+
             var s = SavingAction.Create(node);
             return s.ValidateAction(StateAction.Save) == ActionValidationResult.Valid;
         }
         public static bool HasPublish(GenericContent node)
         {
+            if (node == null || node.IsHeadOnly)
+                return false;
+
             var s = SavingAction.Create(node);
             return s.ValidateAction(StateAction.Publish) == ActionValidationResult.Valid;
         }
         public static bool HasApprove(GenericContent node)
         {
+            if (node == null || node.IsHeadOnly)
+                return false;
+
             var s = SavingAction.Create(node);
             return s.ValidateAction(StateAction.Approve) == ActionValidationResult.Valid;
         }
         public static bool HasReject(GenericContent node)
         {
+            if (node == null || node.IsHeadOnly)
+                return false;
+
             var s = SavingAction.Create(node);
             return s.ValidateAction(StateAction.Reject) == ActionValidationResult.Valid;
         }
@@ -932,6 +987,9 @@ namespace SenseNet.ContentRepository
 
         public static bool HasForceUndoCheckOutRight(Node content)
         {
+            if (content == null || content.IsHeadOnly)
+                return false;
+
             return IsCheckedOutByAnotherUser(content) && content.Security.HasPermission(PermissionType.ForceCheckin);
         }
         private static bool IsCheckedOutByAnotherUser(Node content)

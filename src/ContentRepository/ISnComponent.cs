@@ -1,4 +1,5 @@
 ﻿using System;
+using SenseNet.Packaging;
 
 namespace SenseNet.ContentRepository
 {
@@ -20,6 +21,7 @@ namespace SenseNet.ContentRepository
         /// an exception will be thrown.
         /// Null value means: supports only its own version.
         /// </summary>
+        [Obsolete("Do not use this feature anymore.")]
         Version SupportedVersion { get; }
 
         /// <summary>
@@ -34,5 +36,7 @@ namespace SenseNet.ContentRepository
         /// <param name="componentVersion">The currently installed version of the component.</param>
         /// <returns>True if the assembly and component versions are compatible.</returns>
         bool IsComponentAllowed(Version componentVersion);
+
+        void AddPatches(PatchBuilder builder);
     }
 }

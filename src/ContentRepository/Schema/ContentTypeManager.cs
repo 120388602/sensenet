@@ -1,23 +1,28 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text;
+using System.Threading;
 using System.Xml.XPath;
 using SenseNet.Communication.Messaging;
 using SenseNet.Configuration;
 using SenseNet.ContentRepository.Search;
-using SenseNet.ContentRepository.Search.Querying;
+using SenseNet.ContentRepository.Search.Indexing;
 using SenseNet.ContentRepository.Storage;
 using SenseNet.ContentRepository.Storage.Schema;
 using SenseNet.ContentRepository.Storage.Search;
 using SenseNet.Diagnostics;
 using SnCS = SenseNet.ContentRepository.Storage;
-using SenseNet.Search;
 using SenseNet.Search.Indexing;
 using SenseNet.Tools;
+using STT=System.Threading.Tasks;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using EventId = SenseNet.Diagnostics.EventId;
 
 namespace SenseNet.ContentRepository.Schema
 {
@@ -26,12 +31,17 @@ namespace SenseNet.ContentRepository.Schema
         [Serializable]
         internal sealed class ContentTypeManagerResetDistributedAction : DistributedAction
         {
-            public override void DoAction(bool onRemote, bool isFromMe)
+            public override string TraceMessage => null;
+
+            public override STT.Task DoActionAsync(bool onRemote, bool isFromMe, CancellationToken cancellationToken)
             {
                 // Local echo of my action: Return without doing anything
                 if (onRemote && isFromMe)
-                    return;
+                    return STT.Task.CompletedTask;
+
                 ContentTypeManager.ResetPrivate();
+
+                return STT.Task.CompletedTask;
             }
         }
 
@@ -42,6 +52,7 @@ namespace SenseNet.ContentRepository.Schema
         private static bool _initializing = false;
 
         private const string ContentTypeManagerProviderKey = "ContentTypeManager";
+        private ILogger<ContentTypeManager> _logger;
 
         [Obsolete("Use Instace instead.")]
         public static ContentTypeManager Current => Instance;
@@ -50,23 +61,38 @@ namespace SenseNet.ContentRepository.Schema
         {
             get
             {
-                if (Providers.Instance.GetProvider<ContentTypeManager>(ContentTypeManagerProviderKey) == null)
+                var contentTypeManager = Providers.Instance.GetProvider<ContentTypeManager>(ContentTypeManagerProviderKey);
+                if (contentTypeManager == null)
                 {
                     lock (_syncRoot)
                     {
-                        if (Providers.Instance.GetProvider<ContentTypeManager>(ContentTypeManagerProviderKey) == null)
+                        contentTypeManager = Providers.Instance.GetProvider<ContentTypeManager>(ContentTypeManagerProviderKey);
+                        if (contentTypeManager == null)
                         {
                             _initializing = true;
-                            var current = new ContentTypeManager();
-                            current.Initialize();
+                            var ctm = new ContentTypeManager();
+                            ctm.Initialize();
+                            contentTypeManager = ctm;
                             _initializing = false;
-                            Providers.Instance.SetProvider(ContentTypeManagerProviderKey, current);
-                            SnLog.WriteInformation("ContentTypeManager created. Content types: " + current._contentTypes.Count);
+                            Providers.Instance.SetProvider(ContentTypeManagerProviderKey, ctm);
+                            contentTypeManager._logger.LogInformation("ContentTypeManager created. Content types: " + ctm._contentTypes.Count);
                         }
                     }
                 }
-                return Providers.Instance.GetProvider<ContentTypeManager>(ContentTypeManagerProviderKey);
+
+                return contentTypeManager;
             }
+        }
+
+        internal static ContentTypeManager CreateForTests()
+        {
+            var result = new ContentTypeManager();
+
+            result._contentPaths = new Dictionary<string, string>();
+            result._contentTypes = new Dictionary<string, ContentType>();
+            result.AllFieldNames = new List<string>();
+
+            return result;
         }
 
         // =======================================================================
@@ -86,16 +112,18 @@ namespace SenseNet.ContentRepository.Schema
             if (Instance._contentTypeNamesByType == null)
             {
                 var contentTypeNamesByType = new Dictionary<Type, NodeType>();
-                foreach (var nt in ActiveSchema.NodeTypes)
+                foreach (var nt in Providers.Instance.StorageSchema.NodeTypes)
                 {
-                    var type = TypeResolver.GetType(nt.ClassName);
-                    NodeType prevNt;
+                    var type = TypeResolver.GetType(nt.ClassName, false);
+                    if (type == null)
+                        continue;
+
                     if (type == typeof(GenericContent))
                     {
                         if (nt.Name == "GenericContent")
                             contentTypeNamesByType.Add(type, nt);
                     }
-                    else if (!contentTypeNamesByType.TryGetValue(type, out prevNt))
+                    else if (!contentTypeNamesByType.TryGetValue(type, out var prevNt))
                         contentTypeNamesByType.Add(type, nt);
                     else
                         if (prevNt.IsInstaceOfOrDerivedFrom(nt))
@@ -103,9 +131,10 @@ namespace SenseNet.ContentRepository.Schema
                 }
                 Instance._contentTypeNamesByType = contentTypeNamesByType;
             }
-            NodeType nodeType;
-            if (Instance._contentTypeNamesByType.TryGetValue(t, out nodeType))
+
+            if (Instance._contentTypeNamesByType.TryGetValue(t, out var nodeType))
                 return nodeType.Name;
+
             return null;
         }
         #endregion
@@ -124,6 +153,8 @@ namespace SenseNet.ContentRepository.Schema
 
         private void Initialize()
         {
+            _logger = Providers.Instance.Services.GetRequiredService<ILogger<ContentTypeManager>>();
+
             using (new SenseNet.ContentRepository.Storage.Security.SystemAccount())
             {
                 _contentPaths = new Dictionary<string, string>();
@@ -132,7 +163,9 @@ namespace SenseNet.ContentRepository.Schema
                 // temporary save: read enumerator only once
                 var contentTypes = new List<ContentType>();
 
-                var result = NodeQuery.QueryNodesByTypeAndPath(ActiveSchema.NodeTypes["ContentType"], false, String.Concat(Repository.ContentTypesFolderPath, SnCS.RepositoryPath.PathSeparator), true);
+                var result = NodeQuery.QueryNodesByTypeAndPath(
+                    Providers.Instance.StorageSchema.NodeTypes["ContentType"], false, 
+                    string.Concat(Repository.ContentTypesFolderPath, SnCS.RepositoryPath.PathSeparator), true);
 
                 foreach (ContentType contentType in result.Nodes)
                 {
@@ -148,6 +181,9 @@ namespace SenseNet.ContentRepository.Schema
                         contentType.SetParentContentType(_contentTypes[contentType.ParentTypeName]);
                 }
                 AllFieldNames = contentTypes.SelectMany(t => t.FieldSettings.Select(f => f.Name)).Distinct().ToList();
+
+                _fsInfoTable = CreateFsInfoTable();
+
                 FinalizeAllowedChildTypes(AllFieldNames);
                 FinalizeIndexingInfo();
             }
@@ -164,7 +200,7 @@ namespace SenseNet.ContentRepository.Schema
             SnLog.WriteInformation("ContentTypeManager.Reset called.", EventId.RepositoryRuntime,
                 properties: new Dictionary<string, object> { { "AppDomain", AppDomain.CurrentDomain.FriendlyName } });
 
-            new ContentTypeManagerResetDistributedAction().Execute();
+            new ContentTypeManagerResetDistributedAction().ExecuteAsync(CancellationToken.None).GetAwaiter().GetResult();
         }
         private static void ResetPrivate()
         {
@@ -173,7 +209,6 @@ namespace SenseNet.ContentRepository.Schema
                 SnLog.WriteInformation("ContentTypeManager.Reset executed.", EventId.RepositoryRuntime,
                    properties: new Dictionary<string, object> { { "AppDomain", AppDomain.CurrentDomain.FriendlyName } });
 
-                // Do not call ActiveSchema.Reset();
                 Providers.Instance.SetProvider(ContentTypeManagerProviderKey, null);
                 _indexingInfoTable = new Dictionary<string, IPerFieldIndexingInfo>();
                 ContentType.OnTypeSystemRestarted();
@@ -230,9 +265,6 @@ namespace SenseNet.ContentRepository.Schema
                     editor.Load();
                     RemoveContentType(contentType, editor);
                     editor.Register();
-
-                    // The ContentTypeManager distributes its reset, no custom DistributedAction call needed
-                    ContentTypeManager.Reset();
                 }
             }
         }
@@ -272,11 +304,17 @@ namespace SenseNet.ContentRepository.Schema
             // #2 Load ContentType
             ContentType contentType = Instance.GetContentTypeByName(name);
 
-            // #3 Parent Node: if it is loaded yet use it (ReferenceEqals)
+            // #3 Parent Node: if it is loaded yet use it (ReferenceEquals)
             Node parentNode;
-            if (String.IsNullOrEmpty(parentTypeName))
+            if (string.IsNullOrEmpty(parentTypeName))
             {
+                if(name != "ContentType" && name != "GenericContent")
+                    throw new ContentRegistrationException(SR.Exceptions.Registration.Msg_MissingParentContentType, name);
                 parentNode = (Folder)Node.LoadNode(Repository.ContentTypesFolderPath);
+            }
+            else if (parentTypeName == "ContentType")
+            {
+                throw new ContentRegistrationException(SR.Exceptions.Registration.Msg_ForbiddenParentContentType, name);
             }
             else
             {
@@ -325,7 +363,7 @@ namespace SenseNet.ContentRepository.Schema
             }
         }
 
-        internal static void ApplyChanges(ContentType settings)
+        internal static void ApplyChanges(ContentType settings, bool reset)
         {
             SchemaEditor editor = new SchemaEditor();
             editor.Load();
@@ -333,7 +371,8 @@ namespace SenseNet.ContentRepository.Schema
             editor.Register();
 
             // The ContentTypeManager distributes its reset, no custom DistributedAction call needed
-            ContentTypeManager.Reset();
+            if (reset)
+                ContentTypeManager.Reset(); // necessary (ApplyChanges) calls ContentType.Save
         }
         internal static void ApplyChangesInEditor(ContentType contentType, SchemaEditor editor)
         {
@@ -350,6 +389,17 @@ namespace SenseNet.ContentRepository.Schema
                 parentNodeType = editor.NodeTypes[contentType.ParentTypeName];
                 if (parentNodeType == null)
                     throw new ContentRegistrationException(SR.Exceptions.Registration.Msg_UnknownParentContentType, contentType.Name);
+
+                // make sure that all content handlers defined on the parent chain exist
+                var pnt = parentNodeType;
+                while (pnt != null)
+                {
+                    var ht = TypeResolver.GetType(pnt.ClassName, false);
+                    if (ht == null)
+                        throw new RegistrationException($"Unknown content handler: {pnt.ClassName}");
+
+                    pnt = pnt.Parent;
+                }
             }
 
             // handler type
@@ -370,6 +420,8 @@ namespace SenseNet.ContentRepository.Schema
             // 2: Field properties
             foreach (FieldSetting fieldSetting in contentType.FieldSettings)
             {
+                Instance.AssertFieldSettingIsValid(fieldSetting);
+
                 Type[][] slots = fieldSetting.HandlerSlots;
                 int fieldSlotCount = slots.GetLength(0);
 
@@ -494,6 +546,92 @@ namespace SenseNet.ContentRepository.Schema
                 return;
             throw new NotSupportedException(String.Format(CultureInfo.InvariantCulture,
                 SR.Exceptions.Registration.Msg_InvalidReferenceField_2, cts.Name, fs.Name));
+        }
+
+        /* ---------------------------------------------------------------------- FieldSetting validation */
+
+        [DebuggerDisplay("{Name}: {FieldType} ({Binding})")]
+        private class FieldSettingInfo
+        {
+            public string Name;
+            public string Binding;
+            public string FieldType;
+        }
+        private class FieldSettingInfoEqualityComparer : IEqualityComparer<FieldSettingInfo>
+        {
+            public bool Equals(FieldSettingInfo x, FieldSettingInfo y)
+            {
+                if (ReferenceEquals(x, y)) return true;
+                if (ReferenceEquals(x, null)) return false;
+                if (ReferenceEquals(y, null)) return false;
+                if (x.GetType() != y.GetType()) return false;
+                return x.Name == y.Name;
+            }
+
+            public int GetHashCode(FieldSettingInfo obj)
+            {
+                return (obj.Name != null ? obj.Name.GetHashCode() : 0);
+            }
+        }
+
+        private readonly object _fsInfoTableLock = new object();
+        private List<FieldSettingInfo> _fsInfoTable;
+        private void AssertFieldSettingIsValid(FieldSetting fieldSetting)
+        {
+            var contentTypeName = fieldSetting.Owner.Name;
+            var fieldName = fieldSetting.Name;
+
+            if(fieldSetting.Name.Equals("Actions", StringComparison.OrdinalIgnoreCase) ||
+               fieldSetting.Name.Equals("Children", StringComparison.OrdinalIgnoreCase))
+                throw new ContentRegistrationException(
+                    $"The '{fieldName}' field cannot be used in any content type definition. ContentType: {contentTypeName}",
+                    null, contentTypeName, fieldName);
+
+            FieldSettingInfo fs = null;
+            lock (_fsInfoTableLock)
+            {
+                fs = _fsInfoTable.FirstOrDefault(x => x.Name == fieldSetting.Name);
+                if (fs == null)
+                {
+                    _fsInfoTable.Add(CreateFsInfo(fieldSetting));
+                    return;
+                }
+            }
+
+            if (fs.FieldType != fieldSetting.FieldClassName)
+                throw new ContentRegistrationException(
+                    $"Field type violation in the {contentTypeName} content type definition. " +
+                    $"The expected 'type' of the '{fieldName}' field is {fs.FieldType}.",
+                    null, contentTypeName, fieldName);
+
+            var actualBinding = string.Join(", ", fieldSetting.Bindings);
+            if (fs.Binding != actualBinding)
+                throw new ContentRegistrationException(
+                    $"Field 'Binding' violation in the {contentTypeName}.{fieldName}. " +
+                    $"Expected: {fs.Binding}. Actual: {actualBinding}.",
+                    null, contentTypeName, fieldName);
+        }
+
+        private List<FieldSettingInfo> CreateFsInfoTable()
+        {
+            var all = ContentTypes.Values.SelectMany(x => x.FieldSettings.Where(y => y.Owner == x))
+                .Select(CreateFsInfo)
+                .OrderBy(x => x.Name)
+                .ThenBy(x => x.FieldType)
+                .Distinct(new FieldSettingInfoEqualityComparer())
+                .ToList();
+
+            return all;
+        }
+
+        private FieldSettingInfo CreateFsInfo(FieldSetting fs)
+        {
+            return new FieldSettingInfo
+            {
+                Name = fs.Name,
+                Binding = string.Join(", ", fs.Bindings),
+                FieldType = fs.FieldClassName
+            };
         }
 
         // ---------------------------------------------------------------------- Attribute parsing
@@ -721,7 +859,10 @@ namespace SenseNet.ContentRepository.Schema
 
         private void FinalizeIndexingInfo()
         {
-            SearchManager.SearchEngine.SetIndexingInfo(_indexingInfoTable);
+            if (!Providers.Instance.SearchManager.SearchEngine.IndexingEngine.Running)
+                return;
+
+            Providers.Instance.SearchManager.SearchEngine.SetIndexingInfo(_indexingInfoTable);
         }
 
         public static long _GetTimestamp()
@@ -734,5 +875,146 @@ namespace SenseNet.ContentRepository.Schema
                 return -1;
             return ct.NodeTimestamp;
         }
+
+        // ======================================================================
+
+        /// <summary>
+        /// Gets the name of every field in the system.
+        /// </summary>
+        /// <param name="includeNonIndexedFields">Whether or not to include non-indexed fields. Default is true.</param>
+        /// <returns>A list which contains the name of every field in the system which meets the specificed criteria.</returns>
+        public static IEnumerable<string> GetAllFieldNames(bool includeNonIndexedFields = true)
+        {
+            if (includeNonIndexedFields)
+                return Instance.AllFieldNames;
+
+            return Instance.AllFieldNames.Where(x => ContentTypeManager.Instance.IndexingInfo.ContainsKey(x)
+                                                     && Instance.IndexingInfo[x].IsInIndex);
+        }
+
+        /// <summary>
+        /// Gets detailed indexing information about all fields in the repository.
+        /// </summary>
+        /// <param name="includeNonIndexedFields">Whether to include non-indexed fields.</param>
+        /// <returns>Detailed indexing information about all fields in the repository.</returns>
+        public static IEnumerable<ExplicitPerFieldIndexingInfo> GetExplicitPerFieldIndexingInfo(bool includeNonIndexedFields)
+        {
+            var infoArray = new List<ExplicitPerFieldIndexingInfo>(ContentTypeManager.Instance.ContentTypes.Count * 5);
+
+            foreach (var contentType in ContentTypeManager.Instance.ContentTypes.Values)
+            {
+                var xml = new System.Xml.XmlDocument();
+                var nsmgr = new System.Xml.XmlNamespaceManager(xml.NameTable);
+                var fieldCount = 0;
+
+                nsmgr.AddNamespace("x", ContentType.ContentDefinitionXmlNamespace);
+                xml.Load(contentType.Binary.GetStream());
+                var fieldNodes = xml.SelectNodes("/x:ContentType/x:Fields/x:Field", nsmgr);
+                if (fieldNodes != null)
+                {
+                    foreach (System.Xml.XmlElement fieldElement in fieldNodes)
+                    {
+                        var typeAttr = fieldElement.Attributes["type"] ?? fieldElement.Attributes["handler"];
+
+                        var info = new ExplicitPerFieldIndexingInfo
+                        {
+                            ContentTypeName = contentType.Name,
+                            ContentTypePath =
+                                contentType.Path.Replace(Repository.ContentTypesFolderPath + "/", String.Empty),
+                            FieldName = fieldElement.Attributes["name"].Value,
+                            FieldType = typeAttr.Value
+                        };
+
+                        var fieldTitleElement = fieldElement.SelectSingleNode("x:DisplayName", nsmgr);
+                        if (fieldTitleElement != null)
+                            info.FieldTitle = fieldTitleElement.InnerText;
+
+                        var fieldDescElement = fieldElement.SelectSingleNode("x:Description", nsmgr);
+                        if (fieldDescElement != null)
+                            info.FieldDescription = fieldDescElement.InnerText;
+
+                        var hasIndexing = false;
+                        var indexingNodes = fieldElement.SelectNodes("x:Indexing/*", nsmgr);
+                        if (indexingNodes != null)
+                        {
+                            foreach (System.Xml.XmlElement element in indexingNodes)
+                            {
+                                if (!Enum.TryParse(element.InnerText, out IndexFieldAnalyzer analyzer))
+                                    analyzer = IndexFieldAnalyzer.Default;
+                                hasIndexing = true;
+                                switch (element.LocalName)
+                                {
+                                    case "Analyzer":
+                                        info.Analyzer = analyzer;
+                                        break;
+                                    case "IndexHandler":
+                                        info.IndexHandler = element.InnerText.Replace("SenseNet.Search", ".");
+                                        break;
+                                    case "Mode":
+                                        info.IndexingMode = element.InnerText;
+                                        break;
+                                    case "Store":
+                                        info.IndexStoringMode = element.InnerText;
+                                        break;
+                                    case "TermVector":
+                                        info.TermVectorStoringMode = element.InnerText;
+                                        break;
+                                }
+                            }
+                        }
+
+                        fieldCount++;
+
+                        if (hasIndexing || includeNonIndexedFields)
+                            infoArray.Add(info);
+                    }
+                }
+
+                // content type without fields
+                if (fieldCount == 0 && includeNonIndexedFields)
+                {
+                    var info = new ExplicitPerFieldIndexingInfo
+                    {
+                        ContentTypeName = contentType.Name,
+                        ContentTypePath = contentType.Path.Replace(Repository.ContentTypesFolderPath + "/", String.Empty),
+                    };
+
+                    infoArray.Add(info);
+                }
+            }
+
+            return infoArray;
+        }
+
+        /// <summary>
+        /// Gets explicit per-field indexing information collected into a table.
+        /// </summary>
+        /// <param name="fullTable">Whether or not to include non-indexed fields.</param>
+        /// <returns>A table containing detailed indexing information.</returns>
+        public static string GetExplicitIndexingInfo(bool fullTable)
+        {
+            var infoArray = GetExplicitPerFieldIndexingInfo(fullTable);
+
+            var sb = new StringBuilder();
+            sb.AppendLine("TypePath\tType\tField\tFieldTitle\tFieldDescription\tFieldType\tMode\tStore\tTVect\tHandler\tAnalyzer");
+            foreach (var info in infoArray)
+            {
+                sb.AppendFormat("{0}\t{1}\t{2}\t{3}\t{4}\t{5}\t{6}\t{7}\t{8}\t{9}\t{10}",
+                    info.ContentTypePath,
+                    info.ContentTypeName,
+                    info.FieldName,
+                    info.FieldTitle,
+                    info.FieldDescription,
+                    info.FieldType,
+                    info.IndexingMode,
+                    info.IndexStoringMode,
+                    info.TermVectorStoringMode,
+                    info.IndexHandler,
+                    info.Analyzer);
+                sb.AppendLine();
+            }
+            return sb.ToString();
+        }
+
     }
 }

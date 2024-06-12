@@ -1,10 +1,13 @@
 ﻿using System;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using SenseNet.ContentRepository;
+using SenseNet.ContentRepository.Storage;
 using SenseNet.ContentRepository.Storage.Security;
 using SenseNet.Diagnostics;
 using SenseNet.Search;
+using Retrier = SenseNet.Tools.Retrier;
 
 namespace SenseNet.Packaging.Steps.Internal
 {
@@ -44,7 +47,8 @@ namespace SenseNet.Packaging.Steps.Internal
             using (new SystemAccount())
             {
                 Parallel.ForEach(ContentQuery
-                        .Query(SafeQueries.LockedContentByPath, QuerySettings.AdminSettings, typeNameArray, path).Nodes
+                        .QueryAsync(SafeQueries.LockedContentByPath, QuerySettings.AdminSettings, 
+                            CancellationToken.None, typeNameArray, path).ConfigureAwait(false).GetAwaiter().GetResult().Nodes
                         .Where(n => n is GenericContent).Cast<GenericContent>(),
                     new ParallelOptions {MaxDegreeOfParallelism = 10},
                     gc =>
@@ -53,7 +57,11 @@ namespace SenseNet.Packaging.Steps.Internal
 
                         try
                         {
-                            gc.UndoCheckOut();
+                            Retrier.Retry(3, 1000, typeof(Exception), () =>
+                            {
+                                var tgc = Node.Load<GenericContent>(gc.Id);
+                                tgc.UndoCheckOutAsync(CancellationToken.None).GetAwaiter().GetResult();
+                            });
                         }
                         catch (Exception ex)
                         {
@@ -61,6 +69,7 @@ namespace SenseNet.Packaging.Steps.Internal
                             var msg = $"Error during undo changes of {gc.Path} (v: {gc.Version}): {ex.Message}";
                             SnLog.WriteException(ex, msg);
                             Logger.LogException(ex, msg);
+                            SnTrace.ContentOperation.WriteError(msg + " " + ex.StackTrace);
                         }
                     });
             }

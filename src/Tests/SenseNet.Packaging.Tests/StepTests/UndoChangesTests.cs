@@ -1,11 +1,13 @@
 ﻿using System;
 using System.Text;
+using System.Threading;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using SenseNet.ContentRepository;
 using SenseNet.ContentRepository.Storage;
 using SenseNet.Packaging.Steps.Internal;
 using SenseNet.Packaging.Tests.Implementations;
-using SenseNet.Tests;
+using SenseNet.Testing;
+using SenseNet.Tests.Core;
 
 namespace SenseNet.Packaging.Tests.StepTests
 {
@@ -20,7 +22,7 @@ namespace SenseNet.Packaging.Tests.StepTests
             // preparing logger
             _log = new StringBuilder();
             var loggers = new[] {new PackagingTestLogger(_log)};
-            var loggerAcc = new PrivateType(typeof(Logger));
+            var loggerAcc = new TypeAccessor(typeof(Logger));
             loggerAcc.SetStaticField("_loggers", loggers);
         }
         [TestCleanup]
@@ -28,8 +30,8 @@ namespace SenseNet.Packaging.Tests.StepTests
         {
         }
 
-        [TestMethod]
-        public void Step_UndoChanges_All() => Test(() =>
+        [TestMethod, TestCategory("Services")]
+        public void Step_UndoChanges_All_CSrv() => Test(() =>
         {
             var parent = CretateFolder(Repository.Root, true);
             var file = CreateFileAndCheckout(parent);
@@ -42,7 +44,7 @@ namespace SenseNet.Packaging.Tests.StepTests
 
             file = Node.Load<File>(file.Id);
 
-            Assert.IsTrue(GetLockedCount() == 0);
+            Assert.AreEqual(0, GetLockedCount());
             Assert.AreNotEqual(VersionStatus.Locked, file.Version.Status);
         });
         [TestMethod]
@@ -120,23 +122,23 @@ namespace SenseNet.Packaging.Tests.StepTests
         private static File CreateFileAndCheckout(Node parent)
         {
             var file = new File(parent) { Name = Guid.NewGuid().ToString() };
-            file.Save();
+            file.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
 
             //TODO: workaround for pinned node.Content issue
             file = Node.Load<File>(file.Id);
-            file.CheckOut();
+            file.CheckOutAsync(CancellationToken.None).GetAwaiter().GetResult();
 
             return file;
         }
         private static SystemFolder CretateFolder(Node parent, bool checkout = false)
         {
             var folder = new SystemFolder(parent) { Name = Guid.NewGuid().ToString() };
-            folder.Save();
+            folder.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
 
             if (checkout)
             {
                 folder = Node.Load<SystemFolder>(folder.Id);
-                folder.CheckOut();
+                folder.CheckOutAsync(CancellationToken.None).GetAwaiter().GetResult();
             }
 
             return folder;

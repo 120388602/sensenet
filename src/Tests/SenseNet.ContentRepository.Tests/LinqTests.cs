@@ -2,14 +2,18 @@
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
+using System.Threading;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
+using SenseNet.Configuration;
 using SenseNet.ContentRepository.Linq;
 using SenseNet.ContentRepository.Schema;
 using SenseNet.ContentRepository.Storage;
+using SenseNet.ContentRepository.Storage.Data;
 using SenseNet.ContentRepository.Storage.Events;
+using SenseNet.ContentRepository.Workspaces;
 using SenseNet.Search;
 using SenseNet.Search.Querying;
-using SenseNet.Tests;
+using SenseNet.Tests.Core;
 // ReSharper disable RedundantBoolCompare
 
 namespace SenseNet.ContentRepository.Tests
@@ -226,8 +230,6 @@ namespace SenseNet.ContentRepository.Tests
                 var expected = "Id:42";
                 Assert.AreEqual(expected, GetQueryString(Content.All.Where(c => c.Id == 42)));
                 Assert.AreEqual(expected, GetQueryString(from c in Content.All where c.Id == 42 select c));
-
-                return true;
             });
         }
 
@@ -251,8 +253,6 @@ namespace SenseNet.ContentRepository.Tests
                 expected = "+Id:>1 +Id:<=4 .SORT:Id";
                 Assert.AreEqual(expected, GetQueryString(Content.All.Where(c => c.Id <= 4 && c.Id > 1).OrderBy(c => c.Id)));
                 Assert.AreEqual(expected, GetQueryString(from c in Content.All where c.Id <= 4 && c.Id > 1 orderby c.Id select c));
-
-                return true;
             });
         }
 
@@ -262,7 +262,6 @@ namespace SenseNet.ContentRepository.Tests
             Test(() =>
             {
                 Assert.AreEqual("-Id:42 +Id:>0", GetQueryString(Content.All.Where(c => c.Id != 42)));
-                return true;
             });
         }
         [TestMethod, TestCategory("IR, LINQ")]
@@ -273,7 +272,6 @@ namespace SenseNet.ContentRepository.Tests
                 Assert.AreEqual("Name:car*", GetQueryString(Content.All.Where(c => c.Name.StartsWith("Car"))));
                 Assert.AreEqual("Name:*r2", GetQueryString(Content.All.Where(c => c.Name.EndsWith("r2"))));
                 Assert.AreEqual("Name:*ro*", GetQueryString(Content.All.Where(c => c.Name.Contains("ro"))));
-                return true;
             });
         }
 
@@ -289,8 +287,6 @@ namespace SenseNet.ContentRepository.Tests
                 expected = "Name:admin .SORT:Id";
                 Assert.AreEqual(expected, GetQueryString(Content.All.Where(c => c.Name == "Admin").OrderBy(c => c.Id)));
                 Assert.AreEqual(expected, GetQueryString(from c in Content.All where c.Name == "Admin" orderby c.Id select c));
-
-                return true;
             });
         }
 
@@ -300,7 +296,6 @@ namespace SenseNet.ContentRepository.Tests
             Test(() =>
             {
                 Assert.AreEqual("DisplayName:''", GetQueryString(Content.All.Where(c => c.DisplayName == "")));
-                return true;
             });
         }
         [TestMethod, TestCategory("IR, LINQ")]
@@ -311,7 +306,6 @@ namespace SenseNet.ContentRepository.Tests
                 var expected = "DisplayName:''";
                 Assert.AreEqual(expected, GetQueryString(Content.All.Where(c => (string)c["DisplayName"] == null)));
                 Assert.AreEqual(expected, GetQueryString(from c in Content.All where (string)c["DisplayName"] == null select c));
-                return true;
             });
         }
         [TestMethod, TestCategory("IR, LINQ")]
@@ -333,8 +327,6 @@ namespace SenseNet.ContentRepository.Tests
                 var d2 = DateTime.Parse(q2);
 
                 Assert.IsTrue(d2 - d0 < TimeSpan.FromSeconds(1));
-
-                return true;
             });
         }
 
@@ -346,7 +338,6 @@ namespace SenseNet.ContentRepository.Tests
                 Assert.AreEqual("-Id:2 +Id:<=4", GetQueryString(Content.All.Where(c => c.Id <= 4 && c.Id != 2)));
                 Assert.AreEqual("-Id:2 +Id:>0", GetQueryString(Content.All.Where(c => c.Id != 2)));
                 Assert.AreEqual("-Id:2 +Id:>0", GetQueryString(Content.All.Where(c => c.Id > 0 && c.Id != 2)));
-                return true;
             });
         }
 
@@ -370,10 +361,8 @@ namespace SenseNet.ContentRepository.Tests
                 q = GetQueryString(Content.All.Where(c => (bool) c["Hidden"]));
                 Assert.AreEqual("Hidden:yes", q);
 
-                q = GetQueryString(Content.All.OfType<Portal.Site>().Where(c => c.EnableClientBasedCulture));
-                Assert.AreEqual("+TypeIs:site +EnableClientBasedCulture:yes", q);
-
-                return true;
+                q = GetQueryString(Content.All.OfType<Workspace>().Where(c => c.IsWallContainer));
+                Assert.AreEqual("+TypeIs:workspace +IsWallContainer:yes", q);
             });
         }
 
@@ -395,14 +384,13 @@ namespace SenseNet.ContentRepository.Tests
                 q = GetQueryString(Content.All.Where(c => !(bool) c["Hidden"]));
                 Assert.AreEqual("Hidden:no", q);
 
-                q = GetQueryString(Content.All.OfType<Portal.Site>().Where(c => !c.EnableClientBasedCulture));
-                Assert.AreEqual("+TypeIs:site +EnableClientBasedCulture:no", q);
+                q = GetQueryString(Content.All.OfType<Workspace>().Where(c => !c.IsWallContainer));
+                Assert.AreEqual("+TypeIs:workspace +IsWallContainer:no", q);
 
                 q =
                     GetQueryString(
-                        Content.All.Where(c => !((Portal.Site) c.ContentHandler).EnableClientBasedCulture));
-                Assert.AreEqual("EnableClientBasedCulture:no", q);
-                return true;
+                        Content.All.Where(c => !((Workspace) c.ContentHandler).IsWallContainer));
+                Assert.AreEqual("IsWallContainer:no", q);
             });
         }
 
@@ -421,8 +409,6 @@ namespace SenseNet.ContentRepository.Tests
                 // ReSharper disable once NegativeEqualityExpression
                 q = GetQueryString(Content.All.Where(c => !(!(c.Index == 42) && !c.IsFolder)));
                 Assert.AreEqual("-(+IsFolder:no -Index:42) +Id:>0", q);
-
-                return true;
             });
         }
 
@@ -434,7 +420,7 @@ namespace SenseNet.ContentRepository.Tests
                 /**/ContentTypeInstaller.InstallContentType(RefTestNode.ContentTypeDefinition);
 
                 var root = new SystemFolder(Repository.Root) {Name = Guid.NewGuid().ToString()};
-                root.Save();
+                root.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                 var mother1 = Content.CreateNew("RefTestNode", root, Guid.NewGuid().ToString()).ContentHandler;
                 SaveNode(mother1);
@@ -442,8 +428,6 @@ namespace SenseNet.ContentRepository.Tests
                 Assert.AreEqual(
                     $"+TypeIs:reftestnode +Mother:{mother1.Id}",
                     GetQueryString(Content.All.OfType<RefTestNode>().Where(c => c.Mother == mother1)));
-
-                return true;
             });
         }
         [TestMethod, TestCategory("IR, LINQ")]
@@ -454,15 +438,13 @@ namespace SenseNet.ContentRepository.Tests
                 /**/ContentTypeInstaller.InstallContentType(RefTestNode.ContentTypeDefinition);
 
                 //var root = new SystemFolder(Repository.Root) { Name = Guid.NewGuid().ToString() };
-                //root.Save();
+                //root.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                 var node = Content.CreateNew("Folder", Repository.Root, Guid.NewGuid().ToString()).ContentHandler;
                 SaveNode(node);
 
                 Assert.AreEqual(
                     $"Neighbors:{node.Id}",
                     GetQueryString(Content.All.Where(c => ((RefTestNode) c.ContentHandler).Neighbors.Contains(node))));
-
-                return true;
             });
         }
 
@@ -502,7 +484,7 @@ namespace SenseNet.ContentRepository.Tests
         //    if (folder == null)
         //    {
         //        folder = new Folder(TestRoot) { Name = folderName };
-        //        folder.Save();
+        //        folder.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
         //        for (int i = 0; i < 4; i++)
         //        {
         //            var content = Content.CreateNew("Car", folder, "Car" + i);
@@ -547,8 +529,6 @@ namespace SenseNet.ContentRepository.Tests
                 var expected = "InFolder:/root/folder1/cars";
                 Assert.AreEqual(expected, GetQueryString(Content.All.Where(c => c.InFolder(root.Path + "/Cars"))));
                 Assert.AreEqual(expected, GetQueryString(from x in Content.All where x.InFolder(root.Path + "/Cars") select x));
-
-                return true;
             });
         }
         [TestMethod, TestCategory("IR, LINQ")]
@@ -557,7 +537,6 @@ namespace SenseNet.ContentRepository.Tests
             Test(() =>
             {
                 Assert.AreEqual("InTree:" + Repository.ImsFolder.Path.ToLowerInvariant(), GetQueryString(Content.All.Where(c => c.InTree(Repository.ImsFolder))));
-                return true;
             });
         }
         [TestMethod, TestCategory("IR, LINQ")]
@@ -586,8 +565,6 @@ namespace SenseNet.ContentRepository.Tests
 
                 Assert.AreEqual(expected, GetQueryString(Content.All.DisableAutofilters().Where(c => c.InTree(root.Path + "/Cars") && typeof(GenericContent).IsAssignableFrom(c.ContentHandler.GetType())).OrderBy(c => c.Name)));
                 Assert.AreEqual(expected, GetQueryString(from c in Content.All.DisableAutofilters() where c.InTree(root.Path + "/Cars") && typeof(GenericContent).IsAssignableFrom(c.ContentHandler.GetType()) orderby c.Name select c));
-
-                return true;
             });
         }
 
@@ -600,7 +577,6 @@ namespace SenseNet.ContentRepository.Tests
                 Assert.AreEqual("Type:group", GetQueryString(Content.All.Where(c => c.ContentType == ContentType.GetByName("Group"))));
                 Assert.AreEqual("Type:car", GetQueryString(Content.All.Where(c => c.Type("Car"))));
                 Assert.AreEqual("TypeIs:car", GetQueryString(Content.All.Where(c => c.TypeIs("Car"))));
-                return true;
             });
         }
 
@@ -622,8 +598,6 @@ namespace SenseNet.ContentRepository.Tests
 
                 Assert.AreEqual("(+Index:85 -Type:car) (+DisplayName:'my nice ferrari' +Type:car)",
                     GetQueryString(Content.All.Where(c => c.Type("Car") ? c.DisplayName == "My nice Ferrari" : c.Index == 85)));
-
-                return true;
             });
         }
 
@@ -644,8 +618,6 @@ namespace SenseNet.ContentRepository.Tests
                                                          where c.InTree(root) && (string) c["DisplayName"] == "Porsche"
                                                          orderby c.Name
                                                          select c));
-
-                return true;
             });
         }
 
@@ -660,8 +632,6 @@ namespace SenseNet.ContentRepository.Tests
                 var expected = "+((+DisplayName:ferrari +Index:4) (+DisplayName:porsche +Index:2)) +InTree:/root/folder1 .SORT:Name .AUTOFILTERS:OFF";
                 Assert.AreEqual(expected, GetQueryString(Content.All.DisableAutofilters().Where(c => c.InTree(root) && (((int)c["Index"] == 2 && (string)c["DisplayName"] == "Porsche") || ((int)c["Index"] == 4 && (string)c["DisplayName"] == "Ferrari"))).OrderBy(c => c.Name)));
                 Assert.AreEqual(expected, GetQueryString(from c in Content.All.DisableAutofilters() where c.InTree(root) && (((int)c["Index"] == 2 && (string)c["DisplayName"] == "Porsche") || ((int)c["Index"] == 4 && (string)c["DisplayName"] == "Ferrari")) orderby c.Name select c));
-
-                return true;
             });
         }
 
@@ -679,8 +649,6 @@ namespace SenseNet.ContentRepository.Tests
                     GetQueryString(
                         Content.All.Where(
                             c => c.InTree(root) && (c.Index == 2 || c.Index == 3 && c.ContentHandler is Group))));
-
-                return true;
             });
         }
 
@@ -697,8 +665,6 @@ namespace SenseNet.ContentRepository.Tests
                         .Where(c => c.InTree(root) && c.TypeIs("Folder"))
                         .OrderBy(c => c.Index)
                         .ThenByDescending(c => c.Name)));
-
-                return true;
             });
         }
 
@@ -742,8 +708,6 @@ namespace SenseNet.ContentRepository.Tests
             {
                 Assert.AreEqual("TypeIs:contenttype .AUTOFILTERS:OFF",
                     GetQueryString(Content.All.DisableAutofilters().OfType<ContentType>()));
-
-                return true;
             });
         }
 
@@ -753,7 +717,6 @@ namespace SenseNet.ContentRepository.Tests
             Test(() =>
             {
                 Assert.AreEqual("IsFolder:yes .TOP:5 .SKIP:8", GetQueryString(Content.All.Where(c => c.IsFolder == true).Skip(8).Take(5)));
-                return true;
             });
         }
 
@@ -774,8 +737,6 @@ namespace SenseNet.ContentRepository.Tests
                 var actual = SnExpression.BuildQuery(expr, typeof(Content), "/Root/FakePath", childrenDef).ToString();
                 var expected = "(+IsFolder:yes +Id:>42) InFolder:/root/fakepath .TOP:15 .SKIP:18 .AUTOFILTERS:OFF";
                 Assert.AreEqual(expected, actual);
-
-                return true;
             });
         }
 
@@ -794,8 +755,6 @@ namespace SenseNet.ContentRepository.Tests
                 var expected = $"(+IsFolder:yes +CreationDate:<'{DateTime.UtcNow.Date:yyyy-MM-dd} 00:00:00.0000') InFolder:/root/fakepath";
 
                 Assert.AreEqual(expected, actual);
-
-                return true;
             });
         }
 
@@ -860,8 +819,6 @@ Id:2 .QUICK";
 
                 var actual = String.Join("\r\n", queries);
                 Assert.AreEqual(expected, actual);
-
-                return true;
             });
         }
 
@@ -887,7 +844,6 @@ Id:<42
 Id:<42 .QUICK";
                 var actual = String.Join("\r\n", queries);
                 Assert.AreEqual(expected, actual);
-                return true;
             });
         }
 
@@ -905,8 +861,49 @@ Id:<42 .QUICK";
                 try { var x = Content.All.Where(c => c.TypeIs(c.DisplayName)).ToArray(); Assert.Fail("#5 Exception wasn't thrown"); } catch (NotSupportedException) { }
                 try { var x = Content.All.Where(c => c.InFolder(c.WorkspacePath)).ToArray(); Assert.Fail("#6 Exception wasn't thrown"); } catch (NotSupportedException) { }
                 try { var x = Content.All.Where(c => c.InTree(c.WorkspacePath)).ToArray(); Assert.Fail("#7 Exception wasn't thrown"); } catch (NotSupportedException) { }
+            });
+        }
 
-                return true;
+        [TestMethod, TestCategory("IR, LINQ")]
+        public void Linq_All()
+        {
+            Test(() =>
+            {
+                var expectedNonSystemCount = CreateSafeContentQuery(
+                    "InTree:/Root .COUNTONLY .AUTOFILTERS:ON", QuerySettings.Default).Execute().Count;
+
+                var expectedAllCount = CreateSafeContentQuery(
+                    "+InTree:/Root .COUNTONLY .AUTOFILTERS:OFF", QuerySettings.Default).Execute().Count;
+
+                // ---------------- TEST CASE 1: All non-system contents in ad-hoc order
+                var contentArray = Content.All.ToArray();
+                // ASSERT
+                Assert.AreEqual(expectedNonSystemCount, contentArray.Length);
+                contentArray = contentArray.OrderBy(c => c.Id).ToArray();
+                for (int i = 1; i < contentArray.Length; i++)
+                    Assert.IsTrue(contentArray[i - 1].Id < contentArray[i].Id);
+
+                // ---------------- TEST CASE 2: All contents in ad-hoc order
+                contentArray = Content.All.DisableAutofilters().ToArray();
+                // ASSERT
+                Assert.AreEqual(expectedAllCount, contentArray.Length);
+                contentArray = contentArray.OrderBy(c => c.Id).ToArray();
+                for (int i = 1; i < contentArray.Length; i++)
+                    Assert.IsTrue(contentArray[i - 1].Id < contentArray[i].Id);
+
+                // ---------------- TEST CASE 3: All non-system contents + sort
+                contentArray = Content.All.OrderByDescending(c => c.Id).ToArray();
+                // ASSERT
+                Assert.AreEqual(expectedNonSystemCount, contentArray.Length);
+                for (int i = 1; i < contentArray.Length; i++)
+                    Assert.IsTrue(contentArray[i - 1].Id > contentArray[i].Id);
+
+                // ---------------- TEST CASE 4: All contents + sort
+                contentArray = Content.All.DisableAutofilters().OrderByDescending(c => c.Id).ToArray();
+                // ASSERT
+                Assert.AreEqual(expectedAllCount, contentArray.Length);
+                for (int i = 1; i < contentArray.Length; i++)
+                    Assert.IsTrue(contentArray[i - 1].Id > contentArray[i].Id);
             });
         }
 
@@ -925,8 +922,6 @@ Id:<42 .QUICK";
                 var actual = SnExpression.BuildQuery(expr, typeof(Content), "/Root/FakePath", childrenDef).ToString();
                 var expected = "+(+TypeIs:folder -Name:c -Name:b -Name:a) +InFolder:/root/fakepath";
                 Assert.AreEqual(expected, actual);
-
-                return true;
             });
         }
 
@@ -952,11 +947,10 @@ Id:<42 .QUICK";
                     Name = aspectName,
                     AspectDefinition = aspectDefinition
                 };
-                aspect.Save();
+                aspect.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                 Assert.AreEqual($"{aspectName}.{ fieldName}:{ fieldValue}",
                 GetQueryString(Content.All.OfType<Content>().Where(c => (string)c[$"{aspectName}.{fieldName}"] == fieldValue)));
-                return true;
             });
         }
 
@@ -965,64 +959,94 @@ Id:<42 .QUICK";
         [TestMethod, TestCategory("IR, LINQ")]
         public void Linq_NotSupported_Select_New()
         {
-            AsEnumerableError("Select", () => { Content.All.Where(c => c.Id < 10)
-                .Select(c => new { c.Id, c.Path }); });
+            AsEnumerableError("Select", () =>
+            {
+                var queryable = Content.All.Where(c => c.Id < 10)
+                    .Select(c => new { c.Id, c.Path });
+            });
         }
         [TestMethod, TestCategory("IR, LINQ")]
         public void Linq_NotSupported_Select_Content()
         {
-            AsEnumerableError("Select", () => { Content.All.Where(c => false)
-                .Select(c => c.ContentHandler).ToArray(); });
+            AsEnumerableError("Select", () =>
+            {
+                var unused = Content.All.Where(c => false)
+                    .Select(c => c.ContentHandler).ToArray();
+            });
         }
         [TestMethod, TestCategory("IR, LINQ")]
         public void Linq_NotSupported_SelectMany()
         {
-            AsEnumerableError("SelectMany", () => { Content.All.Where(c => false)
-                .SelectMany(c => c.Versions).ToArray(); });
+            AsEnumerableError("SelectMany", () =>
+            {
+                var unused = Content.All.Where(c => false)
+                    .SelectMany(c => c.Versions).ToArray();
+            });
         }
         [TestMethod, TestCategory("IR, LINQ")]
         public void Linq_NotSupported_SelectManySelect()
         {
-            AsEnumerableError("SelectMany", () => { Content.All.Where(c => true)
-                .SelectMany(c => c.Versions)
-                .Select(n => Content.Create(n)).ToArray(); });
+            AsEnumerableError("SelectMany", () =>
+            {
+                var unused = Content.All.Where(c => true)
+                    .SelectMany(c => c.Versions)
+                    .Select(n => Content.Create(n)).ToArray();
+            });
         }
         [TestMethod, TestCategory("IR, LINQ")]
         public void Linq_NotSupported_Min()
         {
-            AsEnumerableError("Min", () => { Content.All.Where(c => true).Min(c => c.Id); });
+            AsEnumerableError("Min", () =>
+            {
+                var unused = Content.All.Where(c => true).Min(c => c.Id);
+            });
         }
         [TestMethod, TestCategory("IR, LINQ")]
         public void Linq_NotSupported_Max()
         {
-            AsEnumerableError("Max", () => { Content.All.Where(c => true).Max(c => c.Id); });
+            AsEnumerableError("Max", () =>
+            {
+                var unused = Content.All.Where(c => true).Max(c => c.Id);
+            });
         }
         [TestMethod, TestCategory("IR, LINQ")]
         public void Linq_NotSupported_Sum()
         {
-            AsEnumerableError("Sum", () => { Content.All.Where(c => true).Sum(c => c.Id); });
+            AsEnumerableError("Sum", () =>
+            {
+                var unused = Content.All.Where(c => true).Sum(c => c.Id);
+            });
         }
         [TestMethod, TestCategory("IR, LINQ")]
         public void Linq_NotSupported_Average()
         {
-            AsEnumerableError("Average", () => { Content.All.Where(c => true).Average(c => c.Id); });
+            AsEnumerableError("Average", () =>
+            {
+                var unused = Content.All.Where(c => true).Average(c => c.Id);
+            });
         }
         [TestMethod, TestCategory("IR, LINQ")]
         public void Linq_NotSupported_SkipWhile()
         {
-            AsEnumerableError("SkipWhile", () => { Content.All.Where(c => true).SkipWhile(c => false).ToArray(); });
+            AsEnumerableError("SkipWhile", () =>
+            {
+                var unused = Content.All.Where(c => true).SkipWhile(c => false).ToArray();
+            });
         }
         [TestMethod, TestCategory("IR, LINQ")]
         public void Linq_NotSupported_TakeWhile()
         {
-            AsEnumerableError("TakeWhile", () => { Content.All.Where(c => true).TakeWhile(c => false).ToArray(); });
+            AsEnumerableError("TakeWhile", () =>
+            {
+                var unused = Content.All.Where(c => true).TakeWhile(c => false).ToArray();
+            });
         }
         [TestMethod, TestCategory("IR, LINQ")]
         public void Linq_NotSupported_Join_NonameOutput()
         {
             AsEnumerableError("Join", () =>
             {
-                Content.All.Where(c => c.Id < 10000)
+                var unused = Content.All.Where(c => c.Id < 10000)
                     .Join(
                         Content.All,
                         user => user.Id,
@@ -1036,7 +1060,7 @@ Id:<42 .QUICK";
         {
             AsEnumerableError("Join", () =>
             {
-                Content.All.Where(c => false)
+                var unused = Content.All.Where(c => false)
                     .Join(
                         Content.All,
                         user => user.Id,
@@ -1051,7 +1075,7 @@ Id:<42 .QUICK";
         {
             AsEnumerableError("Aggregate", () =>
             {
-                Content.All.Where(c => false).Aggregate(0, (a, b) => a + b.Id);
+                var unused = Content.All.Where(c => false).Aggregate(0, (a, b) => a + b.Id);
             });
         }
         [TestMethod, TestCategory("IR, LINQ")]
@@ -1059,7 +1083,7 @@ Id:<42 .QUICK";
         {
             AsEnumerableError("Cast", () =>
             {
-                Content.All.Where(c => false).Cast<Content>().ToArray();
+                var unused = Content.All.Where(c => false).Cast<Content>().ToArray();
             });
         }
         [TestMethod, TestCategory("IR, LINQ")]
@@ -1067,7 +1091,7 @@ Id:<42 .QUICK";
         {
             AsEnumerableError("Distinct", () =>
             {
-                Content.All.Where(c => false).Distinct().ToArray();
+                var unused = Content.All.Where(c => false).Distinct().ToArray();
             });
         }
         [TestMethod, TestCategory("IR, LINQ")]
@@ -1075,7 +1099,7 @@ Id:<42 .QUICK";
         {
             AsEnumerableError("Concat", () =>
             {
-                Content.All.Where(c => false).Concat(new Content[0]).ToArray();
+                var unused = Content.All.Where(c => false).Concat(new Content[0]).ToArray();
             });
         }
         [TestMethod, TestCategory("IR, LINQ")]
@@ -1083,7 +1107,7 @@ Id:<42 .QUICK";
         {
             AsEnumerableError("Union", () =>
             {
-                Content.All.Where(c => false).Union(new Content[0]).ToArray();
+                var unused = Content.All.Where(c => false).Union(new Content[0]).ToArray();
             });
         }
         [TestMethod, TestCategory("IR, LINQ")]
@@ -1091,7 +1115,7 @@ Id:<42 .QUICK";
         {
             AsEnumerableError("Intersect", () =>
             {
-                Content.All.Where(c => false).Intersect(new Content[0]).ToArray();
+                var unused = Content.All.Where(c => false).Intersect(new Content[0]).ToArray();
             });
         }
         [TestMethod, TestCategory("IR, LINQ")]
@@ -1099,7 +1123,7 @@ Id:<42 .QUICK";
         {
             AsEnumerableError("Except", () =>
             {
-                Content.All.Where(c => false).Except(new Content[0]).ToArray();
+                var unused = Content.All.Where(c => false).Except(new Content[0]).ToArray();
             });
         }
 
@@ -1109,7 +1133,7 @@ Id:<42 .QUICK";
         {
             AsEnumerableError("GroupBy", () =>
             {
-                Content.All.Where(c => false).GroupBy(c => c);
+                var unused = Content.All.Where(c => false).GroupBy(c => c);
             });
         }
         [TestMethod, TestCategory("IR, LINQ")]
@@ -1117,7 +1141,8 @@ Id:<42 .QUICK";
         {
             AsEnumerableError("GroupJoin", () =>
             {
-                Content.All.Where(c => false).GroupJoin(new Content[0], a => a, b => b, (c, d) => new { A = c, B = d });
+                var unused = Content.All.Where(c => false)
+                    .GroupJoin(new Content[0], a => a, b => b, (c, d) => new {A = c, B = d});
             });
         }
         [TestMethod, TestCategory("IR, LINQ")]
@@ -1125,7 +1150,7 @@ Id:<42 .QUICK";
         {
             AsEnumerableError("All", () =>
             {
-                Content.All.Where(c => false).All(c => true);
+                var unused = Content.All.Where(c => false).All(c => true);
             });
         }
         [TestMethod, TestCategory("IR, LINQ")]
@@ -1133,7 +1158,7 @@ Id:<42 .QUICK";
         {
             AsEnumerableError("Reverse", () =>
             {
-                Content.All.Where(c => false).Reverse().ToArray();
+                var unused = Content.All.Where(c => false).Reverse().ToArray();
             });
         }
         [TestMethod, TestCategory("IR, LINQ")]
@@ -1141,7 +1166,7 @@ Id:<42 .QUICK";
         {
             AsEnumerableError("SequenceEqual", () =>
             {
-                Content.All.Where(c => false).SequenceEqual(new Content[0]);
+                var unused = Content.All.Where(c => false).SequenceEqual(new Content[0]);
             });
         }
         [TestMethod, TestCategory("IR, LINQ")]
@@ -1149,7 +1174,7 @@ Id:<42 .QUICK";
         {
             AsEnumerableError("DefaultIfEmpty", () =>
             {
-                Content.All.Where(c => false).DefaultIfEmpty().ToArray();
+                var unused = Content.All.Where(c => false).DefaultIfEmpty().ToArray();
             });
         }
         [TestMethod, TestCategory("IR, LINQ")]
@@ -1158,7 +1183,7 @@ Id:<42 .QUICK";
             AsEnumerableError("DefaultIfEmpty", () =>
             {
                 Content defaultContent = null;
-                Content.All.Where(c => false).DefaultIfEmpty(defaultContent).ToArray();
+                var unused = Content.All.Where(c => false).DefaultIfEmpty(defaultContent).ToArray();
             });
         }
 
@@ -1167,7 +1192,7 @@ Id:<42 .QUICK";
         {
             AsEnumerableError("Zip", () =>
             {
-                Content.All.Where(c => false).Zip(new Content[0], (a, b) => a).ToArray();
+                var unused = Content.All.Where(c => false).Zip(new Content[0], (a, b) => a).ToArray();
             });
         }
 
@@ -1306,7 +1331,7 @@ Id:<42 .QUICK";
         //    var user = new User(User.Administrator.Parent);
         //    user.Name = "testuser129";
         //    user.Email = email;
-        //    user.Save();
+        //    user.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
 
         //    var result = Content.All.OfType<User>().FirstOrDefault(c => c.InTree(Repository.ImsFolderPath) && c.Email == email);
         //    Assert.IsTrue(result != null);
@@ -1370,8 +1395,6 @@ Id:<42 .QUICK";
                 actual = SnExpression.BuildQuery(null, typeof(Content), "/Root/FakePath", childrenDef).ToString();
                 expected = "+(TypeIs:user TypeIs:group) +InFolder:/root/fakepath";
                 Assert.AreEqual(expected, actual);
-
-                return true;
             });
         }
 
@@ -1390,7 +1413,7 @@ Id:<42 .QUICK";
                     .CreateChild("Folder2", SystemFolder)
                     .CreateChild("File2", File);
 
-                Content content = Content.All.DisableAutofilters()
+                var content = Content.All.DisableAutofilters()
                     .FirstOrDefault(c => c.InTree(testRoot.Path) && c.Type(File));
 
                 Assert.IsNotNull(content);
@@ -1428,7 +1451,7 @@ Id:<42 .QUICK";
         //    if (aspect == null)
         //    {
         //        aspect = new Aspect(Repository.AspectsFolder) { Name = aspectName };
-        //        aspect.Save();
+        //        aspect.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
         //    }
 
 
@@ -1445,9 +1468,9 @@ Id:<42 .QUICK";
         //public void Linq_Bug_ChildrenBatchLoadInsteadOfOneByOne()
         //{
         //    var folderNode = new SystemFolder(TestRoot) { Name = Guid.NewGuid().ToString() };
-        //    folderNode.Save();
+        //    folderNode.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
         //    for (int i = 0; i < 10; i++)
-        //        (new SystemFolder(folderNode) { Name = Guid.NewGuid().ToString() }).Save();
+        //        (new SystemFolder(folderNode) { Name = Guid.NewGuid().ToString() }).SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
         //    ContentRepository.Storage.Caching.Dependency.PathDependency.FireChanged(folderNode.Path);
         //    var content = Content.Load(folderNode.Id);
 
@@ -1567,7 +1590,7 @@ Id:<42 .QUICK";
         {
             foreach (var observer in NodeObserver.GetObserverTypes())
                 node.DisableObserver(observer);
-            node.Save();
+            node.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
         }
 
         private void InvalidOperationTest(Action action)

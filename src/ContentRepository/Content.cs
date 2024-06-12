@@ -12,6 +12,7 @@ using System.IO;
 using SenseNet.Diagnostics;
 using System.ComponentModel;
 using System.Globalization;
+using System.Threading.Tasks;
 using SenseNet.ContentRepository.Fields;
 using SenseNet.ApplicationModel;
 using SenseNet.Search;
@@ -23,6 +24,11 @@ using SenseNet.ContentRepository.Search.Indexing;
 using SenseNet.Search.Querying;
 using SenseNet.Tools;
 using SenseNet.ContentRepository.Sharing;
+using SenseNet.Storage;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 
 namespace SenseNet.ContentRepository
 {
@@ -116,7 +122,7 @@ namespace SenseNet.ContentRepository
     ///     if (content.IsValid)
     ///     {
     ///         //TODO: exception handling if needed
-    ///         content.Save();
+    ///         content.SaveAsync(cancellationToken).GetAwaiter().GetResult();
     ///     }
     ///     else
     ///     {
@@ -125,7 +131,7 @@ namespace SenseNet.ContentRepository
     /// }
     /// </code>
     /// </example>
-    public class Content : FeedContent, ICustomTypeDescriptor
+    public partial class Content : FeedContent, ICustomTypeDescriptor
     {
         public static class Operations
         {
@@ -137,31 +143,73 @@ namespace SenseNet.ContentRepository
             /// The <value>DatabaseAndIndex</value> algorithm will reindex the full content than update the index in the
             /// external index provider the same way as the light-weight algorithm.
             /// </summary>
+            /// <snCategory>Indexing</snCategory>
             /// <param name="content">The content provided by the infrastructure.</param>
             /// <param name="recursive">Whether child content should be reindexed or not. Default: false.</param>
             /// <param name="rebuildLevel">The algorithm selector. Value can be <value>IndexOnly</value> or <value>DatabaseAndIndex</value>. Default: <value>IndexOnly</value></param>
             [ODataAction]
-            public static void RebuildIndex(Content content, bool recursive, IndexRebuildLevel rebuildLevel)
+            [ContentTypes(N.CT.GenericContent, N.CT.ContentType)]
+            [AllowedRoles(N.R.Administrators, N.R.PublicAdministrators, N.R.Developers)]
+            [RequiredPermissions(N.P.Save)]
+            public static System.Threading.Tasks.Task RebuildIndex(Content content, HttpContext httpContext,
+                bool recursive, IndexRebuildLevel rebuildLevel)
             {
-                content.RebuildIndex(recursive, rebuildLevel);
+                return content.RebuildIndexAsync(httpContext.RequestAborted, recursive, rebuildLevel);
             }
             /// <summary>
-            /// Performes a full reindex operation on the content and the whole subtree.
+            /// Performs a full reindex operation on the content and the whole subtree.
             /// </summary>
+            /// <snCategory>Indexing</snCategory>
             /// <param name="content">The content provided by the infrastructure.</param>
             [ODataAction]
-            public static void RebuildIndexSubtree(Content content)
+            [ContentTypes(N.CT.GenericContent, N.CT.ContentType)]
+            [AllowedRoles(N.R.Administrators, N.R.PublicAdministrators, N.R.Developers)]
+            public static System.Threading.Tasks.Task RebuildIndexSubtree(Content content, HttpContext httpContext)
             {
-                content.RebuildIndex(true, IndexRebuildLevel.DatabaseAndIndex);
+                return content.RebuildIndexAsync(httpContext.RequestAborted, true, IndexRebuildLevel.DatabaseAndIndex);
             }
             /// <summary>
             /// Refreshes the index document of the content and the whole subtree using the already existing index data stored in the database.
             /// </summary>
+            /// <snCategory>Indexing</snCategory>
             /// <param name="content">The content provided by the infrastructure.</param>
             [ODataAction]
-            public static void RefreshIndexSubtree(Content content)
+            [ContentTypes(N.CT.GenericContent, N.CT.ContentType)]
+            [AllowedRoles(N.R.Administrators, N.R.PublicAdministrators, N.R.Developers)]
+            public static System.Threading.Tasks.Task RefreshIndexSubtree(Content content, HttpContext httpContext)
             {
-                content.RebuildIndex(true, IndexRebuildLevel.IndexOnly);
+                return content.RebuildIndexAsync(httpContext.RequestAborted, true, IndexRebuildLevel.IndexOnly);
+            }
+            /// <summary>
+            /// Refreshes all index documents in the index using the already existing 
+            /// index data stored in the database. It also cleans up remaining
+            /// indexing activities from the database.
+            /// As this action creates a completely new index, must be used cautiously
+            /// and only by administrators.
+            /// </summary>
+            /// <snCategory>Indexing</snCategory>
+            /// <param name="content">The content provided by the infrastructure.</param>
+            [ODataAction]
+            [ContentTypes(N.CT.PortalRoot)]
+            [AllowedRoles(N.R.Administrators, N.R.PublicAdministrators, N.R.Developers)]
+            public static async System.Threading.Tasks.Task RefreshIndexAndCleanActivities(Content content, HttpContext context)
+            {
+                var logger = context.RequestServices.GetService<ILogger<Content>>();
+                var exclusiveLockOptions = context.RequestServices?.GetService<IOptions<ExclusiveLockOptions>>()?.Value;
+
+                var populator = Providers.Instance.SearchManager.GetIndexPopulator();
+                populator.IndexingError += (sender, e) => 
+                {
+                    SnTrace.Index.WriteError($"Error when indexing {e.Path}: {e.Exception?.Message}");
+                };
+
+                logger.LogInformation($"Populating new index of the whole Content Repository through REST API");
+
+                await ExclusiveBlock.RunAsync("SenseNet.RefreshIndex", Guid.NewGuid().ToString(),
+                    ExclusiveBlockType.WaitForReleased, exclusiveLockOptions, CancellationToken.None, async () =>
+                {
+                    await populator.ClearAndPopulateAllAsync(CancellationToken.None, null).ConfigureAwait(false);
+                }).ConfigureAwait(false);
             }
         }
 
@@ -201,7 +249,7 @@ namespace SenseNet.ContentRepository
         {
             get { return _contentHandler; }
         }
-        public SenseNet.ContentRepository.Storage.Security.SecurityHandler Security
+        public SenseNet.ContentRepository.Storage.Security.NodeSecurity Security
         {
             get { return _contentHandler.Security; }
         }
@@ -248,8 +296,31 @@ namespace SenseNet.ContentRepository
         {
             get
             {
-                var desc = this._fields.ContainsKey("Description") ? this["Description"] as string : _contentHandler.GetPropertySafely("Description") as string;
-                return String.IsNullOrEmpty(desc) ? Content.Create(_contentType).Description : desc;
+                string desc = null;
+
+                if (this._fields.ContainsKey("Description"))
+                {
+                    var fieldValue = this["Description"];
+                    switch (fieldValue)
+                    {
+                        case RichTextFieldValue rtFieldValue:
+                            desc = rtFieldValue.Text;
+                            break;
+                        case string stringValue:
+                            desc = stringValue;
+                            break;
+                    }
+                }
+                else
+                {
+                    desc = _contentHandler.GetPropertySafely("Description") as string;
+                }
+
+                // Fallback to the content type's description - if this is not that content type, because
+                // that would lead to an infinite loop.
+                return string.IsNullOrEmpty(desc) && this.Id != _contentType?.Id
+                    ? Content.Create(_contentType).Description 
+                    : desc;
             }
         }
         public string Icon
@@ -438,7 +509,7 @@ namespace SenseNet.ContentRepository
 
                             SnLog.WriteWarning(
                                 $"Field reset executed on content {this.Path} because field {fieldName} was not found on the content.",
-                                EventId.RepositoryRuntime,
+                                SenseNet.Diagnostics.EventId.RepositoryRuntime,
                                 properties: new Dictionary<string, object> 
                                 { 
                                     { "DynamicFieldsBefore", string.Join(", ", dynamicFieldsBeforeReload) },
@@ -523,6 +594,10 @@ namespace SenseNet.ContentRepository
             // check fields without underlying properties (e.g. Icon)
             if (!this.ContentHandler.HasProperty(fieldName) && this.Fields.ContainsKey(fieldName))
             {
+                // Type is a field but not a property. It is always allowed.
+                if (fieldName == "Type")
+                    return true;
+
                 // Size is a field but not a property. It must be inaccessible even with Preview permissions,
                 // because it relies on the Binary field that is forbidden for preview-only users.
                 if (fieldName == "Size")
@@ -536,6 +611,14 @@ namespace SenseNet.ContentRepository
         }
 
         internal bool ImportingExplicitVersion { get; set; }
+
+        /// <summary>
+        /// Gets or sets a flag that is true if the content is in the Import operation.
+        /// </summary>
+        /// <remarks>
+        /// In some cases, fields may behave differently when saving the owner Content.
+        /// </remarks>
+        public bool Importing { get; set; }
 
         // ========================================================================= Construction
 
@@ -643,9 +726,10 @@ namespace SenseNet.ContentRepository
 
 
         /// <summary>
-        /// Loads the appropiate <see cref="SenseNet.ContentRepository.Storage.Node">ContentHandler</see> by the given ID and wraps to a <c>Content</c>.
+        /// Loads a Content by the provided id.
         /// </summary>
-        /// <returns>The latest version of the <see cref="SenseNet.ContentRepository.Storage.Node">ContentHandler</see> that has the given ID wrapped by a <c>Content</c> instance.</returns>
+        /// <param name="id">Content id.</param>
+        /// <returns>The latest accessible version of the Content.</returns>
         public static Content Load(int id)
         {
             Node node = Node.LoadNode(id);
@@ -654,9 +738,21 @@ namespace SenseNet.ContentRepository
             return Create(node);
         }
         /// <summary>
-        /// Loads the appropiate <see cref="SenseNet.ContentRepository.Storage.Node">ContentHandler</see> by the given Path and wraps to a <c>Content</c>.
+        /// Loads a Content by the provided id.
         /// </summary>
-        /// <returns>The latest version of the <see cref="SenseNet.ContentRepository.Storage.Node">ContentHandler</see> that has the given Path wrapped by a <c>Content</c> instance.</returns>
+        /// <param name="id">Content id.</param>
+        /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
+        /// <returns>The latest accessible version of the Content.</returns>
+        public static async Task<Content> LoadAsync(int id, CancellationToken cancellationToken)
+        {
+            var node = await Node.LoadNodeAsync(id, cancellationToken).ConfigureAwait(false);
+            return node == null ? null : Create(node);
+        }
+        /// <summary>
+        /// Loads a Content by the provided path.
+        /// </summary>
+        /// <param name="path">Content path.</param>
+        /// <returns>The latest accessible version of the Content.</returns>
         public static Content Load(string path)
         {
             Node node = Node.LoadNode(path);
@@ -665,9 +761,21 @@ namespace SenseNet.ContentRepository
             return Create(node);
         }
         /// <summary>
-        /// Loads the appropiate <see cref="SenseNet.ContentRepository.Storage.Node">ContentHandler</see> by the given ID and version number and wraps to a <c>Content</c>.
+        /// Loads a Content by the provided path.
         /// </summary>
-        /// <returns>The given version of the <see cref="SenseNet.ContentRepository.Storage.Node">ContentHandler</see> that has the given ID wrapped by a <c>Content</c>.</returns>
+        /// <param name="path">Content path.</param>
+        /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
+        /// <returns>The latest accessible version of the Content.</returns>
+        public static async Task<Content> LoadAsync(string path, CancellationToken cancellationToken)
+        {
+            var node = await Node.LoadNodeAsync(path, cancellationToken).ConfigureAwait(false);
+            return node == null ? null : Create(node);
+        }
+        /// <summary>
+        /// Loads a Content by the provided id and version number.
+        /// </summary>
+        /// <param name="id">Content id.</param>
+        /// <param name="version">Content version.</param>
         public static Content Load(int id, VersionNumber version)
         {
             Node node = Node.LoadNode(id, version);
@@ -676,9 +784,21 @@ namespace SenseNet.ContentRepository
             return Create(node);
         }
         /// <summary>
-        /// Loads the appropiate <see cref="SenseNet.ContentRepository.Storage.Node">ContentHandler</see> by the given Path and version number and wraps to a <c>Content</c>.
+        /// Loads a Content by the provided id and version number.
         /// </summary>
-        /// <returns>The given version of the <see cref="SenseNet.ContentRepository.Storage.Node">ContentHandler</see> that has the given Path wrapped by a <c>Content</c>.</returns>
+        /// <param name="id">Content id.</param>
+        /// <param name="version">Content version.</param>
+        /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
+        public static async Task<Content> LoadAsync(int id, VersionNumber version, CancellationToken cancellationToken)
+        {
+            var node = await Node.LoadNodeAsync(id, version, cancellationToken).ConfigureAwait(false);
+            return node == null ? null : Create(node);
+        }
+        /// <summary>
+        /// Loads a Content by the provided path and version number.
+        /// </summary>
+        /// <param name="path">Content path.</param>
+        /// <param name="version">Content version.</param>
         public static Content Load(string path, VersionNumber version)
         {
             Node node = Node.LoadNode(path, version);
@@ -686,18 +806,38 @@ namespace SenseNet.ContentRepository
                 return null;
             return Create(node);
         }
+        /// <summary>
+        /// Loads a Content by the provided path and version number.
+        /// </summary>
+        /// <param name="path">Content path.</param>
+        /// <param name="version">Content version.</param>
+        /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
+        public static async Task<Content> LoadAsync(string path, VersionNumber version, CancellationToken cancellationToken)
+        {
+            var node = await Node.LoadNodeAsync(path, version, cancellationToken).ConfigureAwait(false);
+            return node == null ? null : Create(node);
+        }
 
+        /// <summary>
+        /// Loads a Content by the provided id or path.
+        /// </summary>
+        /// <param name="idOrPath">Content id or path.</param>
         public static Content LoadByIdOrPath(string idOrPath)
         {
             var node = Node.LoadNodeByIdOrPath(idOrPath);
             return node != null ? Content.Create(node) : null;
         }
-
-        [Obsolete("Use Content.Create instead")]
-        public Content()
+        /// <summary>
+        /// Loads a Content by the provided id or path.
+        /// </summary>
+        /// <param name="idOrPath">Content id or path.</param>
+        /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
+        public static async Task<Content> LoadByIdOrPathAsync(string idOrPath, CancellationToken cancellationToken)
         {
-
+            var node = await Node.LoadNodeByIdOrPathAsync(idOrPath, cancellationToken).ConfigureAwait(false);
+            return node == null ? null : Create(node);
         }
+
         /// <summary>
         /// Creates a <c>Content</c> instance from an instantiated <see cref="SenseNet.ContentRepository.Storage.Node">ContentHandler</see>.
         /// </summary>
@@ -758,7 +898,7 @@ namespace SenseNet.ContentRepository
                 var contentType = ContentTypeManager.Instance.GetContentTypeByName(contentTypeName);
                 if (contentType == null)
                     throw new ApplicationException(String.Concat(SR.Exceptions.Content.Msg_UnknownContentType, ": ", contentTypeName));
-                Type type = TypeResolver.GetType(contentType.HandlerName);
+                Type type = TypeResolver.GetType(contentType.HandlerName, false) ?? typeof(UnknownContentHandler);
 
                 Type[] signature = new Type[args.Length + 2];
                 signature[0] = typeof(Node);
@@ -946,7 +1086,7 @@ namespace SenseNet.ContentRepository
         }
 
         /// <summary>
-        /// Validates and saves the wrapped <c>ContentHandler</c> into the Sense/Net Content Repository with considering the versioning settings.
+        /// Asynchronously validates and saves the wrapped <c>ContentHandler</c> into the Sense/Net Content Repository with considering the versioning settings.
         /// </summary>
         /// <remarks>
         /// This method executes followings:
@@ -969,26 +1109,26 @@ namespace SenseNet.ContentRepository
         /// its version is depends its <see cref="SenseNet.ContentRepository.GenericContent.VersioningMode">VersioningMode</see> setting.
         /// </remarks>
         /// <exception cref="InvalidContentException">Thrown when <c>Content</c> is invalid.</exception>
-        public void Save()
+        public System.Threading.Tasks.Task SaveAsync(CancellationToken cancel)
         {
-            Save(true);
+            return SaveAsync(true, CancellationToken.None);
         }
 
-        public void Save(bool validOnly)
+        public async System.Threading.Tasks.Task SaveAsync(bool validOnly, CancellationToken cancel)
         {
             if (_contentHandler.Locked)
-                Save(validOnly, SavingMode.KeepVersion);
+                await SaveAsync(validOnly, SavingMode.KeepVersion, cancel).ConfigureAwait(false);
             else
-                Save(validOnly, SavingMode.RaiseVersion);
+                await SaveAsync(validOnly, SavingMode.RaiseVersion, cancel).ConfigureAwait(false);
         }
 
-        public void Save(SavingMode mode)
+        public System.Threading.Tasks.Task SaveAsync(SavingMode mode, CancellationToken cancel)
         {
-            Save(true, mode);
+            return SaveAsync(true, mode, cancel);
         }
 
         /// <summary>
-        /// Saves the wrapped <c>ContentHandler</c> into the Sense/Net Content Repository with considering the versioning settings.
+        /// Asynchronously saves the wrapped <c>ContentHandler</c> into the Sense/Net Content Repository with considering the versioning settings.
         /// </summary>
         /// <remarks>
         /// This method executes followings:
@@ -1011,17 +1151,18 @@ namespace SenseNet.ContentRepository
         /// its version is depends its <see cref="SenseNet.ContentRepository.GenericContent.VersioningMode">VersioningMode</see> setting.
         /// </remarks>
         /// <exception cref="InvalidContentException">Thrown when <paramref name="validOnly"> is true  and<c>Content</c> is invalid.</exception>
-        public void Save(bool validOnly, SavingMode mode)
+        public async System.Threading.Tasks.Task SaveAsync(bool validOnly, SavingMode mode, CancellationToken cancel)
         {
+            AssertContentType();
+
             SaveFields(validOnly);
             if (validOnly && !IsValid)
                 throw InvalidContentExceptionHelper();
 
-            var genericContent = _contentHandler as GenericContent;
-            if (genericContent != null)
-                genericContent.Save(mode);
+            if (_contentHandler is GenericContent genericContent)
+                await genericContent.SaveAsync(mode, cancel).ConfigureAwait(false);
             else
-                _contentHandler.Save();
+                await _contentHandler.SaveAsync(cancel).ConfigureAwait(false);
 
             foreach (string key in _fields.Keys)
                 _fields[key].OnSaveCompleted();
@@ -1034,15 +1175,17 @@ namespace SenseNet.ContentRepository
         }
 
         /// <summary>
-        /// Ends the multistep saving process and makes the content available for modification.
+        /// Asynchronously ends the multistep saving process and makes the content available for modification.
         /// </summary>
-        public void FinalizeContent()
+        public async System.Threading.Tasks.Task FinalizeContentAsync(CancellationToken cancel)
         {
-            this.ContentHandler.FinalizeContent();
+            AssertContentType();
+
+            await this.ContentHandler.FinalizeContentAsync(cancel).ConfigureAwait(false);
         }
 
         /// <summary>
-        /// Validates and saves the wrapped <c>ContentHandler</c> into the Sense/Net Content Repository without considering the versioning settings.
+        /// Asynchronously validates and saves the wrapped <c>ContentHandler</c> into the Sense/Net Content Repository without considering the versioning settings.
         /// </summary>
         /// <remarks>
         /// This method executes followings:
@@ -1062,12 +1205,14 @@ namespace SenseNet.ContentRepository
         /// After the saving the version of wrapped <see cref="SenseNet.ContentRepository.Storage.Node">ContentHandler</see> will not changed.
         /// </remarks>
         /// <exception cref="InvalidContentException">Thrown when <c>Content</c> is invalid.</exception>
-        public void SaveSameVersion()
+        public System.Threading.Tasks.Task SaveSameVersionAsync(CancellationToken cancel)
         {
-            SaveSameVersion(true);
+            return SaveSameVersionAsync(true, cancel);
         }
+
         /// <summary>
-        /// Validates and saves the wrapped <c>ContentHandler</c> into the Sense/Net Content Repository without considering the versioning settings.
+        /// Asynchronously validates and saves the wrapped <c>ContentHandler</c> into the Sense/Net Content Repository
+        /// without considering the versioning settings.
         /// </summary>
         /// <remarks>
         /// This method executes followings:
@@ -1088,16 +1233,18 @@ namespace SenseNet.ContentRepository
         /// After the saving the version of wrapped <see cref="SenseNet.ContentRepository.Storage.Node">ContentHandler</see> will not changed.
         /// </remarks>
         /// <exception cref="InvalidContentException">Thrown when <paramref name="validOnly"> is true  and<c>Content</c> is invalid.</exception>
-        public void SaveSameVersion(bool validOnly)
+        public async System.Threading.Tasks.Task SaveSameVersionAsync(bool validOnly, CancellationToken cancel)
         {
+            AssertContentType();
+
             SaveFields(validOnly);
             if (validOnly && !IsValid)
                 throw InvalidContentExceptionHelper();
             GenericContent genericContent = _contentHandler as GenericContent;
             if (genericContent == null)
-                _contentHandler.Save();
+                await _contentHandler.SaveAsync(cancel).ConfigureAwait(false);
             else
-                genericContent.Save(SavingMode.KeepVersion);
+                await genericContent.SaveAsync(SavingMode.KeepVersion, cancel).ConfigureAwait(false);
 
             var template = _contentHandler.Template;
             if (template != null)
@@ -1106,8 +1253,10 @@ namespace SenseNet.ContentRepository
             }
         }
 
-        public void SaveExplicitVersion(bool validOnly = true)
+        public async System.Threading.Tasks.Task SaveExplicitVersionAsync(CancellationToken cancel, bool validOnly = true)
         {
+            AssertContentType();
+
             SaveFields(validOnly);
             if (validOnly && !IsValid)
                 throw InvalidContentExceptionHelper();
@@ -1115,15 +1264,22 @@ namespace SenseNet.ContentRepository
             if (genericContent == null)
                 throw new InvalidOperationException("Only a generic content can be saved with explicit version.");
             else
-                genericContent.SaveExplicitVersion();
+                await genericContent.SaveExplicitVersionAsync(CancellationToken.None).ConfigureAwait(false);
 
             var template = _contentHandler.Template;
             if (template != null)
                 ContentTemplate.CopyContents(this);
         }
 
+        private void AssertContentType()
+        {
+            if (this.ContentType.IsInvalid)
+                throw new SnNotSupportedException(
+                    $"Cannot save a content with the type {this.ContentType.Name}. A content handler or a field is missing.");
+        }
+
         /// <summary>
-        /// Validates and publishes the wrapped <c>ContentHandler</c> if it is a <c>GenericContent</c> otherwise saves it normally.
+        /// Asynchronously validates and publishes the wrapped <c>ContentHandler</c> if it is a <c>GenericContent</c> otherwise saves it normally.
         /// </summary>
         /// <remarks>
         /// This method executes followings:
@@ -1143,38 +1299,41 @@ namespace SenseNet.ContentRepository
         /// </list>
         /// </remarks>
         /// <exception cref="InvalidContentException">Thrown when <c>Content</c> is invalid.</exception>
-        public void Publish()
+        public async System.Threading.Tasks.Task PublishAsync(CancellationToken cancel)
         {
             SaveFields();
 
             var genericContent = _contentHandler as GenericContent;
             if (genericContent == null)
-                _contentHandler.Save();
+                await _contentHandler.SaveAsync(cancel).ConfigureAwait(false);
             else
-                genericContent.Publish();
+                await genericContent.PublishAsync(cancel).ConfigureAwait(false);
         }
-        public void Approve()
+
+        public async System.Threading.Tasks.Task ApproveAsync(CancellationToken cancel)
         {
             SaveFields();
 
             var genericContent = _contentHandler as GenericContent;
             if (genericContent == null)
-                _contentHandler.Save();
+                await _contentHandler.SaveAsync(cancel).ConfigureAwait(false);
             else
-                genericContent.Approve();
+                await genericContent.ApproveAsync(cancel).ConfigureAwait(false);
         }
-        public void Reject()
+
+        public async System.Threading.Tasks.Task RejectAsync(CancellationToken cancel)
         {
             SaveFields();
 
             var genericContent = _contentHandler as GenericContent;
             if (genericContent == null)
-                _contentHandler.Save();
+                await _contentHandler.SaveAsync(cancel).ConfigureAwait(false);
             else
-                genericContent.Reject();
+                await genericContent.RejectAsync(cancel).ConfigureAwait(false);
         }
+
         /// <summary>
-        /// Saves all <see cref="SenseNet.ContentRepository.Field">Field</see>s into the properties of wrapped <see cref="SenseNet.ContentRepository.Storage.Node">ContentHandler</see>.
+        /// Asynchronously saves all <see cref="SenseNet.ContentRepository.Field">Field</see>s into the properties of wrapped <see cref="SenseNet.ContentRepository.Storage.Node">ContentHandler</see>.
         /// 
         /// If <c>Content</c> is not valid throws an <see cref="InvalidContentException">InvalidContentException</see>.
         /// 
@@ -1208,7 +1367,7 @@ namespace SenseNet.ContentRepository
         /// </list>
         /// </remarks>
         /// <exception cref="InvalidContentException">Thrown when <c>Content</c> is invalid.</exception>
-        public void CheckIn()
+        public async System.Threading.Tasks.Task CheckInAsync(CancellationToken cancel)
         {
             SaveFields();
 
@@ -1216,10 +1375,10 @@ namespace SenseNet.ContentRepository
             if (genericContent == null)
                 _contentHandler.Lock.Unlock(VersionStatus.Approved, VersionRaising.None);
             else
-                genericContent.CheckIn();
+                await genericContent.CheckInAsync(cancel).ConfigureAwait(false);
         }
 
-        public void CheckOut()
+        public async System.Threading.Tasks.Task CheckOutAsync(CancellationToken cancel)
         {
             SaveFields();
 
@@ -1227,10 +1386,10 @@ namespace SenseNet.ContentRepository
             if (genericContent == null)
                 _contentHandler.Lock.Lock();
             else
-                genericContent.CheckOut();
+                await genericContent.CheckOutAsync(cancel).ConfigureAwait(false);
         }
 
-        public void UndoCheckOut()
+        public async System.Threading.Tasks.Task UndoCheckOutAsync(CancellationToken cancel)
         {
             SaveFields();
 
@@ -1238,10 +1397,10 @@ namespace SenseNet.ContentRepository
             if (genericContent == null)
                 _contentHandler.Lock.Unlock(VersionStatus.Approved, VersionRaising.None);
             else
-                genericContent.UndoCheckOut();
+                await genericContent.UndoCheckOutAsync(cancel).ConfigureAwait(false);
         }
 
-        public void ForceUndoCheckOut()
+        public async System.Threading.Tasks.Task ForceUndoCheckOutAsync(CancellationToken cancel)
         {
             if (!SavingAction.HasForceUndoCheckOutRight(this.ContentHandler))
                 throw new Storage.Security.SenseNetSecurityException(this.Path, Storage.Security.PermissionType.ForceCheckin);
@@ -1252,7 +1411,7 @@ namespace SenseNet.ContentRepository
             if (genericContent == null)
                 _contentHandler.Lock.Unlock(VersionStatus.Approved, VersionRaising.None);
             else
-                genericContent.UndoCheckOut();
+                await genericContent.UndoCheckOutAsync(cancel).ConfigureAwait(false);
         }
 
         public void DontSave()
@@ -1317,63 +1476,59 @@ namespace SenseNet.ContentRepository
         }
 
         /// <summary>
-        /// Deletes the Node and all of its contents from the database. This operation removes all child nodes too.
+        /// Asynchronously deletes the Node and all of its contents from the database. This operation removes all child nodes too.
         /// </summary>
         /// <param name="contentId">Identifier of the Node that will be deleted.</param>
-        public static void DeletePhysical(int contentId)
+        public static System.Threading.Tasks.Task ForceDeleteAsync(int contentId, CancellationToken cancel)
         {
-            Node.ForceDelete(contentId);
+            return Node.ForceDeleteAsync(contentId, cancel);
         }
+
         /// <summary>
-        /// Deletes the Node and all of its contents from the database. This operation removes all child nodes too.
+        /// Asynchronously deletes the Node and all of its contents from the database. This operation removes all child nodes too.
         /// </summary>
         /// <param name="path">The path of the Node that will be deleted.</param>
-        public static void DeletePhysical(string path)
+        public static System.Threading.Tasks.Task ForceDeleteAsync(string path, CancellationToken cancel)
         {
-            Node.ForceDelete(path);
+            return Node.ForceDeleteAsync(path, cancel);
         }
+
+        public static System.Threading.Tasks.Task DeleteAsync(int contentId, CancellationToken cancel)
+        {
+            return Node.DeleteAsync(contentId, cancel);
+        }
+
+        public static System.Threading.Tasks.Task DeleteAsync(string path, CancellationToken cancel)
+        {
+            return Node.DeleteAsync(path, cancel);
+        }
+
+        public System.Threading.Tasks.Task DeleteAsync(CancellationToken cancel)
+        {
+            return this.ContentHandler.DeleteAsync(cancel);
+        }
+
         /// <summary>
-        /// Deletes the represented <see cref="SenseNet.ContentRepository.Storage.Node">Node</see> and all of its contents from the database. This operation removes all child nodes too.
+        /// Asynchronously deletes the <see cref="Node"/> permanently.
         /// </summary>
-        public void DeletePhysical()
+        public System.Threading.Tasks.Task ForceDeleteAsync(CancellationToken cancel)
         {
-            ForceDelete();
+            return this.ContentHandler.ForceDeleteAsync(cancel);
         }
 
-        public static void Delete(int contentId)
-        {
-            Node.Delete(contentId);
-        }
-
-        public static void Delete(string path)
-        {
-            Node.Delete(path);
-        }
-
-        public void Delete()
-        {
-            this.ContentHandler.Delete();
-        }
-
-        public void ForceDelete()
-        {
-            this.ContentHandler.ForceDelete();
-        }
-
-        public void Delete(bool byPassTrash)
+        public async System.Threading.Tasks.Task DeleteAsync(bool byPassTrash, CancellationToken cancel)
         {
             if (!byPassTrash)
             {
-                this.ContentHandler.Delete();
+                await this.ContentHandler.DeleteAsync(cancel);
             }
             else
             {
-                // only GenericContent has a byPassTrash functinality
-                var gc = this.ContentHandler as GenericContent;
-                if (gc != null)
-                    gc.Delete(byPassTrash);
+                // only GenericContent has a byPassTrash functionality
+                if (this.ContentHandler is GenericContent gc)
+                    await gc.DeleteAsync(byPassTrash, cancel);
                 else
-                    this.ContentHandler.Delete();
+                    await this.ContentHandler.DeleteAsync(cancel);
             }
         }
 
@@ -1386,31 +1541,24 @@ namespace SenseNet.ContentRepository
                 String.Join(", ", (from field in fields where !field.IsValid select field.DisplayName ?? field.Name).ToArray())));
         }
 
-        [Obsolete("Use the methods of the ContentNamingProvider class instead")]
-        public static string GenerateNameFromTitle(string parent, string title)
-        {
-            return ContentNamingProvider.GetNameFromDisplayName(title);
-        }
-
-        [Obsolete("Use the methods of the ContentNamingProvider class instead")]
-        public static string GenerateNameFromTitle(string title)
-        {
-            return ContentNamingProvider.GetNameFromDisplayName(title);
-        }
 
         /// <summary>
-        /// Rebuilds the index document of a content and optionally of all documents in the whole subtree. 
+        /// Asynchronously rebuilds the index document of a content and optionally of all documents in the whole subtree. 
         /// In case the value of <value>rebuildLevel</value> is <value>IndexOnly</value> the index document is refreshed 
         /// based on the already existing extracted data stored in the database. This is a significantly faster method 
         /// and it is designed for cases when only the place of the content in the tree has changed or the index got corrupted.
         /// The <value>DatabaseAndIndex</value> algorithm will reindex the full content than update the index in the
         /// external index provider the same way as the light-weight algorithm.
         /// </summary>
+        /// <param name="cancel">The token to monitor for cancellation requests.</param>
         /// <param name="recursive">Whether child content should be reindexed or not. Default: false.</param>
         /// <param name="rebuildLevel">The algorithm selector. Value can be <value>IndexOnly</value> or <value>DatabaseAndIndex</value>. Default: <value>IndexOnly</value></param>
-        public void RebuildIndex(bool recursive = false, IndexRebuildLevel rebuildLevel = IndexRebuildLevel.IndexOnly)
+        public async System.Threading.Tasks.Task RebuildIndexAsync(CancellationToken cancel, 
+            bool recursive = false, IndexRebuildLevel rebuildLevel = IndexRebuildLevel.IndexOnly)
         {
-            SearchManager.GetIndexPopulator().RebuildIndex(this.ContentHandler, recursive, rebuildLevel);
+            await Providers.Instance.SearchManager.GetIndexPopulator()
+                .RebuildIndexAsync(this.ContentHandler, cancel, recursive, rebuildLevel)
+                .ConfigureAwait(false);
         }
 
         /*-------------------------------------------------------------------------- SnLinq */
@@ -1663,11 +1811,11 @@ namespace SenseNet.ContentRepository
             if (saveContent)
             {
                 if (ImportingExplicitVersion)
-                    this.SaveExplicitVersion();
+                    this.SaveExplicitVersionAsync(CancellationToken.None).GetAwaiter().GetResult();
                 else if (context.IsNewContent)
-                    this.SaveSameVersion();
+                    this.SaveSameVersionAsync(CancellationToken.None).GetAwaiter().GetResult();
                 else
-                    this.Save(context.NeedToValidate);
+                    this.SaveAsync(context.NeedToValidate, CancellationToken.None).GetAwaiter().GetResult();
             }
 
             return true;
@@ -1897,7 +2045,7 @@ namespace SenseNet.ContentRepository
             }
             catch (InvalidContentActionException ex)
             {
-                SnLog.WriteWarning(ex.Message, EventId.Indexing, properties: new Dictionary<string, object>
+                SnLog.WriteWarning(ex.Message, SenseNet.Diagnostics.EventId.Indexing, properties: new Dictionary<string, object>
                 {
                     { "Id", this.Id },
                     { "Path", this.Path },
@@ -1905,15 +2053,6 @@ namespace SenseNet.ContentRepository
             }
 
             return new ActionBase[0];
-        }
-        /// <summary>
-        /// Returns all conventional (non-virtual) actions available on the Content.
-        /// </summary>
-        /// <returns>An IEnumerable&lt;ActionBase&gt;</returns>
-        [Obsolete("Use the Actions property instead")]
-        public IEnumerable<ActionBase> GetContentActions()
-        {
-            return GetActions();
         }
 
         // =================================================================================== Runtime Content
@@ -1939,6 +2078,18 @@ namespace SenseNet.ContentRepository
                 throw new ApplicationException("Cannot create content from a " + objectToEdit.GetType().FullName);
             var node = new RuntimeContentHandler(objectToEdit, contentType);
             return new Content(node, contentType);
+        }
+        public static Content[] CreateCollection<T>(IEnumerable<T> objects, string ctd)
+        {
+            if (objects == null)
+                throw new ArgumentNullException(nameof(objects));
+
+            var contentType = ContentType.Create(typeof(T), ctd);
+            if (contentType == null)
+                throw new ApplicationException("Cannot create content from a " + typeof(T).FullName);
+
+            var result = objects.Select(x => new Content(new RuntimeContentHandler(x, contentType), contentType));
+            return result.ToArray();
         }
 
         public class RuntimeContentHandler : Node
@@ -2060,6 +2211,10 @@ namespace SenseNet.ContentRepository
             }
 
             public override void Save() { }
+            public override System.Threading.Tasks.Task SaveAsync(CancellationToken cancel)
+            {
+                return System.Threading.Tasks.Task.CompletedTask;
+            }
         }
 
         // ============================================================================= ICustomTypeDescriptor
@@ -2252,7 +2407,7 @@ namespace SenseNet.ContentRepository
                 // NUMBER
                 if (result != null && content.Fields[_fieldName] is NumberField)
                 {
-                    if ((decimal)result == ActiveSchema.DecimalMinValue)
+                    if ((decimal)result == Providers.Instance.StorageSchema.DecimalMinValue)
                         return null;
                 }
 
@@ -2337,6 +2492,8 @@ namespace SenseNet.ContentRepository
             {
                 if (content is ContentType)
                     return ContentType.GetByName("ContentType").FieldSettings.Select(f => f.Name).ToArray();
+                if(content is RuntimeContentHandler dynamicContent)
+                    return dynamicContent.ContentType.FieldSettings.Select(f => f.Name).ToArray();
                 return allNames;
             }
 
@@ -2375,12 +2532,18 @@ namespace SenseNet.ContentRepository
                         names.Add(field.Name);
             }
 
-            var dynamicContentTypes = types.Where(x => typeof(ISupportsDynamicFields).IsAssignableFrom(TypeResolver.GetType(x.HandlerName))).ToArray();
+            var dynamicContentTypes = types.Where(x =>
+            {
+                var handler = TypeResolver.GetType(x.HandlerName, false);
+                return handler != null && typeof(ISupportsDynamicFields).IsAssignableFrom(handler);
+            }).ToArray();
+
             if (dynamicContentTypes.Length > 0)
             {
-                var results = ContentQuery.Query(SafeQueries.InFolderAndTypeIs,
+                var results = ContentQuery.QueryAsync(SafeQueries.InFolderAndTypeIs,
                     new QuerySettings { EnableAutofilters = FilterStatus.Enabled, QueryExecutionMode = QueryExecutionMode.Quick },
-                    content.Path, dynamicContentTypes);
+                    CancellationToken.None,
+                    content.Path, dynamicContentTypes).ConfigureAwait(false).GetAwaiter().GetResult();
                 foreach (var meta in results.Nodes.Cast<ISupportsDynamicFields>().Select(x => x.GetDynamicFieldMetadata()).Where(x => x != null))
                     names.AddRange(meta.Keys.Where(x => !names.Contains(x)).Distinct());
             }

@@ -2,10 +2,11 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using SenseNet.ApplicationModel;
-using SenseNet.Tests;
+using SenseNet.Tests.Core;
 
 namespace SenseNet.ContentRepository.Tests
 {
@@ -40,20 +41,38 @@ namespace SenseNet.ContentRepository.Tests
         {
             Test(() =>
             {
-                // Get first generic scenario
-                var genericScenario = ApplicationStorage.Instance.ScenarioNames
-                    .Select(ScenarioManager.GetScenario)
-                    .Where(s => s != null)
-                    .FirstOrDefault(s => s.GetType() == typeof(GenericScenario));
+                var parentPath = "/Root/(apps)/GenericContent";
+                var appPath = parentPath + "/tempapp";
+                
+                // create at least one app with a scenario
+                RepositoryTools.CreateStructure(parentPath, "SystemFolder");
+                var tempAppContent = RepositoryTools.CreateStructure(appPath, "Application") ?? Content.Load(appPath);
+                var tempApp = (Application)tempAppContent.ContentHandler;
+                tempApp.Scenario = "SC1,SC2";
+                tempApp.SaveAsync(SavingMode.KeepVersion, CancellationToken.None).GetAwaiter().GetResult();
 
-                // The test method is invalid if there is no any generic scenario
-                if (genericScenario == null)
-                    Assert.Inconclusive();
+                try
+                {
+                    // Get first generic scenario
+                    var genericScenario = ApplicationStorage.Instance.ScenarioNames
+                        .Select(ScenarioManager.GetScenario)
+                        .Where(s => s != null)
+                        .FirstOrDefault(s => s.GetType() == typeof(GenericScenario));
 
-                // Test
-                var instance1 = ScenarioManager.GetScenario(genericScenario.Name);
-                var instance2 = ScenarioManager.GetScenario(genericScenario.Name);
-                Assert.AreSame(instance1, instance2);
+                    // The test method is invalid if there is no any generic scenario
+                    if (genericScenario == null)
+                        Assert.Inconclusive();
+
+                    // Test
+                    var instance1 = ScenarioManager.GetScenario(genericScenario.Name);
+                    var instance2 = ScenarioManager.GetScenario(genericScenario.Name);
+                    Assert.AreSame(instance1, instance2);
+                }
+                finally
+                {
+                    // cleanup
+                    tempAppContent.ForceDeleteAsync(CancellationToken.None).GetAwaiter().GetResult();
+                }
             });
         }
     }

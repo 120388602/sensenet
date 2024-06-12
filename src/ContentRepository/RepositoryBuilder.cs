@@ -1,4 +1,5 @@
 ﻿using System;
+using SenseNet.ContentRepository.Storage.DataModel;
 using SenseNet.Diagnostics;
 using SenseNet.Tools;
 
@@ -39,10 +40,19 @@ namespace SenseNet.ContentRepository
         }
 
         #endregion
-        
-        internal static void WriteLog(string name, object provider)
+
+        public RepositoryBuilder(IServiceProvider services)
         {
-            var message = $"{name} configured: {provider?.GetType().FullName ?? "null"}";
+            Services = services;
+        }
+
+        public InitialData InitialData { get; set; }
+        public IServiceProvider Services { get; }
+
+        public static void WriteLog(string name, object provider)
+        {
+            var providerName = provider is string pName ? pName : provider?.GetType().FullName ?? "null";
+            var message = $"{name} configured: {providerName}";
 
             SnTrace.Repository.Write(message);
             SnLog.WriteInformation(message);

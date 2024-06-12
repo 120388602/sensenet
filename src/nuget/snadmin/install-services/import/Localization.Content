@@ -7,6 +7,10 @@
   </Fields>
   <Permissions>
     <Clear />
+    <Identity path="/Root/IMS/BuiltIn/Portal/Owners">
+      <Save>Allow</Save>
+      <Delete>Allow</Delete>
+    </Identity>
     <Identity path="/Root/IMS/BuiltIn/Portal/Developers">
       <See>Allowed</See>
       <Preview>Allowed</Preview>
@@ -27,6 +31,15 @@
       <RunApplication>Allowed</RunApplication>
       <ManageListsAndWorkspaces>Allowed</ManageListsAndWorkspaces>
       <TakeOwnership>Allowed</TakeOwnership>
+    </Identity>
+    <Identity path="/Root/IMS/Public/Administrators">
+      <AddNew>Allow</AddNew>
+      <Save>Allow</Save>
+    </Identity>
+    <Identity path="/Root/IMS/Public/Administrators" propagation="LocalOnly">
+      <Save>Deny</Save>
+      <Delete>Deny</Delete>
+      <SetPermissions>Deny</SetPermissions>
     </Identity>
   </Permissions>  
 </ContentMetaData>

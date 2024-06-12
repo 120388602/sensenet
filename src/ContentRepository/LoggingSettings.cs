@@ -1,5 +1,10 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.DependencyInjection;
+using STT =System.Threading.Tasks;
 using SenseNet.Communication.Messaging;
 using SenseNet.Configuration;
 using SenseNet.ContentRepository.Schema;
@@ -22,10 +27,14 @@ namespace SenseNet.ContentRepository
 
         private const string TRACESETTINGS_UPDATED_KEY = "TraceUpdated";
 
+        [Obsolete("Use async version instead.", true)]
         public override void Save(NodeSaveSettings settings)
         {
-            base.Save(settings);
-
+            SaveAsync(settings, CancellationToken.None).GetAwaiter().GetResult();
+        }
+        public override async STT.Task SaveAsync(NodeSaveSettings settings, CancellationToken cancel)
+        {
+            await base.SaveAsync(settings, cancel).ConfigureAwait(false);
             UpdateCategories();
         }
 
@@ -46,19 +55,24 @@ namespace SenseNet.ContentRepository
                 SetCachedData(TRACESETTINGS_UPDATED_KEY, true);
 
                 // update flags on all connected servers
-                new UpdateCategoriesDistributedAction().Execute();
+                // (no need to wait for this method)
+                _ = new UpdateCategoriesDistributedAction().ExecuteAsync(CancellationToken.None);
             }
         }
 
         [Serializable]
         public class UpdateCategoriesDistributedAction : DistributedAction
         {
-            public override void DoAction(bool onRemote, bool isFromMe)
+            public override string TraceMessage => null;
+
+            public override STT.Task DoActionAsync(bool onRemote, bool isFromMe, CancellationToken cancellationToken)
             {
                 if (onRemote && isFromMe)
-                    return;
+                    return STT.Task.CompletedTask;
 
-                SnTraceConfigurator.UpdateCategories();
+                SnTraceConfigurator.UpdateCategoriesBySettings();
+
+                return STT.Task.CompletedTask;
             }
         }
 
@@ -66,22 +80,30 @@ namespace SenseNet.ContentRepository
         {
             private const string SETTINGS_NAME = "Logging";
             private const string SETTINGS_PREFIX = "Trace.";
-            public static void UpdateCategories()
-            {
-                foreach (var category in SnTrace.Categories)
-                    category.Enabled = Settings.GetValue(SETTINGS_NAME, SETTINGS_PREFIX + category.Name, null, false);
+            private static Dictionary<string, bool> _basicCategories;
 
-                SnLog.WriteInformation("Trace settings were updated.", EventId.RepositoryRuntime,
-                    properties: SnTrace.Categories.ToDictionary(c => c.Name, c => (object)c.Enabled.ToString()));
+            public static void UpdateCategoriesBySettings()
+            {
+                if (_basicCategories == null || _basicCategories.Count == 0)
+                    _basicCategories = SnTrace.Categories.ToDictionary(c => c.Name, c => false);
+
+                foreach (var category in SnTrace.Categories)
+                {
+                    var value = Settings.GetValue<bool?>(SETTINGS_NAME, SETTINGS_PREFIX + category.Name, null);
+                    category.Enabled = value ?? _basicCategories[category.Name];
+                }
+
+                WriteInformation("settings");
             }
 
-            public static void UpdateStartupCategories()
+            public static void ConfigureCategories()
             {
                 foreach (var category in SnTrace.Categories)
                     category.Enabled = Tracing.StartupTraceCategories.Contains(category.Name);
 
-                SnLog.WriteInformation("Trace settings were updated (for STARTUP).", EventId.RepositoryRuntime,
-                    properties: SnTrace.Categories.ToDictionary(c => c.Name, c => (object)c.Enabled.ToString()));
+                WriteInformation("configuration");
+
+                UpdateBasicCategories();
             }
 
             /// <summary>
@@ -93,17 +115,38 @@ namespace SenseNet.ContentRepository
                 if (categoryNames == null)
                 {
                     SnTrace.DisableAll();
-                    return;
                 }
-
-                // do not switch off any category, only switch ON the listed ones
-                foreach (var category in SnTrace.Categories.Where(c => categoryNames.Contains(c.Name)))
+                else
                 {
-                    category.Enabled = true;
+                    // do not switch off any category, only switch ON the listed ones
+                    foreach (var category in SnTrace.Categories.Where(c => categoryNames.Contains(c.Name)))
+                    {
+                        category.Enabled = true;
+                    }
                 }
 
-                SnTrace.System.Write("Trace settings were updated. Enabled: {0}", string.Join(", ", SnTrace.Categories
-                    .Where(c => c.Enabled).Select(c => c.Name)));
+                UpdateBasicCategories();
+
+                WriteInformation("assembly");
+            }
+
+            private static void UpdateBasicCategories()
+            {
+                _basicCategories = SnTrace.Categories.ToDictionary(c => c.Name, c => c.Enabled);
+            }
+
+            private static void WriteInformation(string source)
+            {
+                var logger = Providers.Instance?.Services.GetService<ILogger<LoggingSettings>>();
+                logger?.LogInformation($"Trace settings were updated (from {source}). " +
+                                       $"Enabled: {CategoriesToString(true)}. " +
+                                       $"Disabled: {CategoriesToString(false)}");
+            }
+            private static string CategoriesToString(bool isEnabled)
+            {
+                return string.Join(", ", SnTrace.Categories
+                    .Where(x => x.Enabled == isEnabled)
+                    .Select(x => x.Name));
             }
         }
     }

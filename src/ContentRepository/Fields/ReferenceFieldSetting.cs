@@ -3,8 +3,10 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Xml;
 using System.Xml.XPath;
+using SenseNet.Configuration;
 using SenseNet.ContentRepository.Schema;
 using SenseNet.ContentRepository.Storage;
 using SenseNet.ContentRepository.Storage.Search;
@@ -237,13 +239,13 @@ namespace SenseNet.ContentRepository.Fields
             if (list == null)
                 return result;
 
-            if ((this.Compulsory ?? false) && (list.Count == 0))
+            if ((this.Compulsory ?? false) && (list.Count == 0) && !field.Content.Importing)
                 return new FieldValidationResult(CompulsoryName);
 
             if (this.Query != null)
                 if ((result = ValidateWithQuery(list, this.Query)) != FieldValidationResult.Successful)
                     return result;
-            if ((result = ValidateCount(list)) != FieldValidationResult.Successful)
+            if ((result = ValidateCount(list, field.Content.Importing)) != FieldValidationResult.Successful)
                 return result;
             if (this.AllowedTypes != null)
                 if ((result = ValidateTypes(list)) != FieldValidationResult.Successful)
@@ -298,10 +300,10 @@ namespace SenseNet.ContentRepository.Fields
             result = new FieldValidationResult("ReferenceValue");
             return list;
         }
-        private FieldValidationResult ValidateCount(List<Node> list)
+        private FieldValidationResult ValidateCount(List<Node> list, bool importing)
         {
             // Compulsory
-            bool required = this.Compulsory ?? false;
+            bool required = !importing && (this.Compulsory ?? false);
             bool allowMultiple = this.AllowMultiple ?? false;
 
             if (required && list.Count == 0)
@@ -390,7 +392,8 @@ namespace SenseNet.ContentRepository.Fields
         }
         private FieldValidationResult ValidateWithQuery(List<Node> list, ContentQuery query)
         {
-            var x = query.Execute();
+            var x = query.ExecuteAsync(CancellationToken.None)
+                .ConfigureAwait(false).GetAwaiter().GetResult();
             List<int> idList = x.Identifiers.ToList();
             idList.Sort();
             foreach (Node node in list)
@@ -407,18 +410,20 @@ namespace SenseNet.ContentRepository.Fields
 
         private List<string> CollectExactTypeNames(List<string> rootTypeNames)
         {
+            var schema = Providers.Instance.StorageSchema;
             var allowedTypeNames = new List<string>();
             foreach (string typeName in rootTypeNames)
             {
-                if (ActiveSchema.NodeTypes[typeName] == null)
-                    throw new ApplicationException(String.Concat("Unknown NodeType in ReferenceField: ", typeName));
+                if (schema.NodeTypes[typeName] == null)
+                    //throw new ApplicationException(String.Concat("Unknown NodeType in ReferenceField: ", typeName));
+                    continue;
                 if (!allowedTypeNames.Contains(typeName))
                     allowedTypeNames.Add(typeName);
             }
             var index = 0;
             while (index < allowedTypeNames.Count)
             {
-                foreach (var childType in ActiveSchema.NodeTypes[allowedTypeNames[index]].Children)
+                foreach (var childType in schema.NodeTypes[allowedTypeNames[index]].Children)
                     allowedTypeNames.Add(childType.Name);
                 index++;
             }

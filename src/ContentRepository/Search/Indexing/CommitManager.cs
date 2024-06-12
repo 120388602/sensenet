@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Threading;
 using System.Timers;
+using STT = System.Threading.Tasks;
 
 namespace SenseNet.ContentRepository.Search.Indexing
 {
@@ -20,11 +21,18 @@ namespace SenseNet.ContentRepository.Search.Indexing
         /// <summary>
         /// Called by the indexing activity manager after execution of every activity.
         /// </summary>
-        void ActivityFinished();
+        STT.Task ActivityFinishedAsync();
     }
 
     internal class NoDelayCommitManager : ICommitManager
     {
+        private IndexManager _indexManager;
+
+        public NoDelayCommitManager(IndexManager indexManager)
+        {
+            _indexManager = indexManager;
+        }
+
         public void Start()
         {
             // do nothing
@@ -33,20 +41,27 @@ namespace SenseNet.ContentRepository.Search.Indexing
         {
             // do nothing
         }
-        public void ActivityFinished()
+        public STT.Task ActivityFinishedAsync()
         {
-            IndexManager.Commit();
+            return _indexManager.CommitAsync(CancellationToken.None);
         }
     }
 
     internal class NearRealTimeCommitManager : ICommitManager
     {
+        private IndexManager _indexManager;
+
         private static readonly TimeSpan MaxWaitTime = TimeSpan.FromSeconds(10);
         private DateTime _lastCommitTime;
         private int _uncommittedActivityCount;
 
         private static System.Timers.Timer _timer;
         private static readonly int HearthBeatMilliseconds = 1000;
+
+        public NearRealTimeCommitManager(IndexManager indexManager)
+        {
+            _indexManager = indexManager;
+        }
 
         public void Start()
         {
@@ -67,7 +82,7 @@ namespace SenseNet.ContentRepository.Search.Indexing
         private void Timer_Elapsed(object sender, ElapsedEventArgs e)
         {
             if (_uncommittedActivityCount > 0 && DateTime.UtcNow - _lastCommitTime > MaxWaitTime)
-                Commit();
+                CommitAsync().ConfigureAwait(false).GetAwaiter().GetResult();
         }
 
         public void ShutDown()
@@ -76,17 +91,17 @@ namespace SenseNet.ContentRepository.Search.Indexing
             _timer.Dispose();
         }
 
-        public void ActivityFinished()
+        public async STT.Task ActivityFinishedAsync()
         {
             Interlocked.Increment(ref _uncommittedActivityCount);
 
             if (_uncommittedActivityCount == 1 || DateTime.UtcNow - _lastCommitTime > MaxWaitTime)
-                Commit();
+                await CommitAsync().ConfigureAwait(false);
         }
-        
-        private void Commit()
+
+        private async STT.Task CommitAsync()
         {
-            IndexManager.Commit();
+            await _indexManager.CommitAsync(CancellationToken.None).ConfigureAwait(false);
             Interlocked.Exchange(ref _uncommittedActivityCount, 0);
             _lastCommitTime = DateTime.UtcNow;
         }

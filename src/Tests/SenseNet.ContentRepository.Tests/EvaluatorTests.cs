@@ -1,7 +1,12 @@
-﻿using Microsoft.VisualStudio.TestTools.UnitTesting;
+﻿using System;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.VisualStudio.TestTools.UnitTesting;
 using SenseNet.Configuration;
+using SenseNet.ContentRepository.Schema;
 using SenseNet.ContentRepository.Storage.Scripting;
-using SenseNet.Tests;
+using SenseNet.Extensions.DependencyInjection;
+using SenseNet.Testing;
+using SenseNet.Tests.Core;
 
 namespace SenseNet.ContentRepository.Tests
 {
@@ -30,7 +35,14 @@ namespace SenseNet.ContentRepository.Tests
         {
             const string script = "[Script:testTag]...myscript...[/Script]";
 
-            Assert.AreEqual("success", Evaluator.Evaluate(script));
+            var repo = new RepositoryBuilder(new ServiceCollection().BuildServiceProvider());
+            using (new Swindler<IEvaluator>(new TestEvaluator(),
+                () => Providers.Instance.GetProvider<IEvaluator>(Evaluator.GetFullTagName("testTag")),
+                value => { repo.UseScriptEvaluator(value); }
+            ))
+            {
+                Assert.AreEqual("success", Evaluator.Evaluate(script));
+            }
         }
         [TestMethod]
         public void Evaluator_Eval_NonExisting()
@@ -44,17 +56,37 @@ namespace SenseNet.ContentRepository.Tests
         {
             const string script = "[Script:testTag]...myscript...[/Script]";
 
-            var original = Providers.Instance.GetProvider<IEvaluator>(Evaluator.GetFullTagName("testTag"));
-            var repo = new RepositoryBuilder();
-            repo.UseScriptEvaluator(new CustomTestEvaluator());
+            var repo = new RepositoryBuilder(new ServiceCollection().BuildServiceProvider());
+            using (new Swindler<IEvaluator>(new CustomTestEvaluator(),
+                () => Providers.Instance.GetProvider<IEvaluator>(Evaluator.GetFullTagName("testTag")),
+                value => { repo.UseScriptEvaluator(value); }
+            ))
+            {
+                // the custom evaluator should be in control
+                Assert.AreEqual("custom", Evaluator.Evaluate(script));
+            }
+        }
 
-            // the custom evaluator should be in control
-            Assert.AreEqual("custom", Evaluator.Evaluate(script));
+        [TestMethod]
+        public void Evaluator_DefaultValue()
+        {
+            Test(() =>
+            {
+                Assert.AreEqual(null, FieldSetting.EvaluateDefaultValue(null));
+                Assert.AreEqual(string.Empty, FieldSetting.EvaluateDefaultValue(""));
+                Assert.AreEqual("@currentdate@", FieldSetting.EvaluateDefaultValue("@currentdate@")); // not a template syntax
+                Assert.AreEqual("@@NOTEMPLATE@@", FieldSetting.EvaluateDefaultValue("@@NOTEMPLATE@@")); // unknown template
 
-            // back to the original
-            repo.UseScriptEvaluator(original);
-            
-            Assert.AreEqual("success", Evaluator.Evaluate(script));
+                using (new CurrentUserBlock(User.Administrator))
+                {
+                    Assert.AreEqual("1", FieldSetting.EvaluateDefaultValue("@@currentuser@@"));
+                }
+
+                var date1 = FieldSetting.EvaluateDefaultValue("@@currenttime@@");
+
+                // the two dates can be a little bit different, because the main algorithm rounds the date to seconds
+                Assert.IsTrue( DateTime.UtcNow - DateTime.Parse(date1) < TimeSpan.FromSeconds(1));
+            });
         }
     }
 }

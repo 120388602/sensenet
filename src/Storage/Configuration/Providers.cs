@@ -5,7 +5,6 @@ using SenseNet.ContentRepository;
 using SenseNet.ContentRepository.Storage;
 using SenseNet.ContentRepository.Storage.Caching;
 using SenseNet.ContentRepository.Storage.Data;
-using SenseNet.ContentRepository.Storage.Data.SqlClient;
 using SenseNet.ContentRepository.Storage.Events;
 using SenseNet.ContentRepository.Storage.Security;
 using SenseNet.Diagnostics;
@@ -14,11 +13,20 @@ using SenseNet.Security;
 using SenseNet.Security.Messaging;
 using SenseNet.Tools;
 using System.Linq;
+using Microsoft.Extensions.Options;
+using SenseNet.ContentRepository.Search.Indexing;
 using SenseNet.ContentRepository.Storage.AppModel;
-using SenseNet.ContentRepository.Storage.Caching.Dependency;
-using SenseNet.ContentRepository.Storage.Schema;
+using SenseNet.ContentRepository.Storage.Data.MsSqlClient;
+using SenseNet.Events;
 using SenseNet.Search.Querying;
 using SenseNet.Tools.Diagnostics;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using SenseNet.ContentRepository.Search;
+using SenseNet.Storage;
+using SenseNet.Storage.Security;
+using SenseNet.TaskManagement.Core;
+using EventId = SenseNet.Diagnostics.EventId;
 
 // ReSharper disable once CheckNamespace
 // ReSharper disable RedundantTypeArgumentsOfMethod
@@ -28,41 +36,10 @@ namespace SenseNet.Configuration
     {
         private const string SectionName = "sensenet/providers";
 
-        public static string EventLoggerClassName { get; internal set; } = GetProvider("EventLogger");
-        public static string PropertyCollectorClassName { get; internal set; } = GetProvider("PropertyCollector",
-            "SenseNet.Diagnostics.ContextEventPropertyCollector");
-        public static string DataProviderClassName { get; internal set; } = GetProvider("DataProvider", typeof(SqlProvider).FullName);
-        public static string AccessProviderClassName { get; internal set; } = GetProvider("AccessProvider",
-            "SenseNet.ContentRepository.Security.UserAccessProvider");
-        public static string ContentNamingProviderClassName { get; internal set; } = GetProvider("ContentNamingProvider");
-        public static string TaskManagerClassName { get; internal set; } = GetProvider("TaskManager");
-        public static string PasswordHashProviderClassName { get; internal set; } = GetProvider("PasswordHashProvider",
-            typeof(SenseNetPasswordHashProvider).FullName);
-        public static string OutdatedPasswordHashProviderClassName { get; internal set; } = GetProvider("OutdatedPasswordHashProvider",
-            typeof(Sha256PasswordHashProviderWithoutSalt).FullName);
-        public static string SkinManagerClassName { get; internal set; } = GetProvider("SkinManager", "SenseNet.Portal.SkinManager");
-        public static string DirectoryProviderClassName { get; internal set; } = GetProvider("DirectoryProvider");
-        public static string SecurityDataProviderClassName { get; internal set; } = GetProvider("SecurityDataProvider",
-            "SenseNet.Security.EF6SecurityStore.EF6SecurityDataProvider");
-        public static string SecurityMessageProviderClassName { get; internal set; } = GetProvider("SecurityMessageProvider", 
-            typeof(DefaultMessageProvider).FullName);
-        public static string DocumentPreviewProviderClassName { get; internal set; } = GetProvider("DocumentPreviewProvider",
-            "SenseNet.Preview.DefaultDocumentPreviewProvider");
-        public static string ClusterChannelProviderClassName { get; internal set; } = GetProvider("ClusterChannelProvider",
-            typeof(VoidChannel).FullName);
-        public static string SearchEngineClassName { get; internal set; } = GetProvider("SearchEngine",
-            "SenseNet.Search.Lucene29.Lucene29SearchEngine");
-        public static string MembershipExtenderClassName { get; internal set; } = GetProvider("MembershipExtender",
-            "SenseNet.ContentRepository.Storage.Security.DefaultMembershipExtender");
-        public static string CacheClassName { get; internal set; } = GetProvider("Cache",
-            typeof(SnMemoryCache).FullName);
-        public static string ApplicationCacheClassName { get; internal set; } = GetProvider("ApplicationCache", "SenseNet.ContentRepository.ApplicationCache");
-
-        public static string ElevatedModificationVisibilityRuleProviderName { get; internal set; } =
-            GetProvider("ElevatedModificationVisibilityRuleProvider",
-                "SenseNet.ContentRepository.SnElevatedModificationVisibilityRule");
-
-        public static bool RepositoryPathProviderEnabled { get; internal set; } = GetValue<bool>(SectionName, "RepositoryPathProviderEnabled", true);
+        public static string AccessProviderClassName => "SenseNet.ContentRepository.Security.DesktopAccessProvider";
+        public static string DirectoryProviderClassName => null;
+        public static string MembershipExtenderClassName => "SenseNet.ContentRepository.Storage.Security.DefaultMembershipExtender";
+        public static bool RepositoryPathProviderEnabled { get;  } = GetValue<bool>(SectionName, "RepositoryPathProviderEnabled", true);
 
         private static string GetProvider(string key, string defaultValue = null)
         {
@@ -71,92 +48,165 @@ namespace SenseNet.Configuration
 
         //===================================================================================== Instance
 
+        public IServiceProvider Services { get; }
+        private ILogger<Providers> _logger;
+
+        public Providers(IServiceProvider services)
+        {
+            Services = services ?? throw new ArgumentNullException(nameof(services));
+            _logger = services.GetService<ILogger<Providers>>();
+
+            DataProvider = services.GetService<DataProvider>();
+            DataStore = services.GetService<IDataStore>();
+            SecurityDataProvider = services.GetService<ISecurityDataProvider>();
+
+            TreeLock = services.GetService<ITreeLockController>();
+
+            StorageSchema = services.GetService<StorageSchema>();
+            CacheProvider = services.GetService<ISnCache>();
+            ApplicationCacheProvider = services.GetService<IApplicationCache>();
+            IndexDocumentProvider = services.GetService<IIndexDocumentProvider>();
+            AuditEventWriter = services.GetService<IAuditEventWriter>();
+            PreviewProvider = services.GetService<IPreviewProvider>();
+            PropertyCollector = services.GetService<IEventPropertyCollector>();
+            SecurityHandler = services.GetService<SecurityHandler>();
+            SecurityMessageProvider = services.GetService<IMessageProvider>();
+            PasswordHashProvider = services.GetService<IPasswordHashProvider>();
+            PasswordHashProviderForMigration = services.GetService<IPasswordHashProviderForMigration>();
+            ContentNamingProvider = services.GetService<IContentNamingProvider>();
+            TaskManager = services.GetService<ITaskManager>();
+            ElevatedModificationVisibilityRuleProvider = services.GetService<ElevatedModificationVisibilityRule>();
+            PermissionFilterFactory = services.GetService<IPermissionFilterFactory>();
+            CompatibilitySupport = services.GetService<ICompatibilitySupport>();
+            ContentProtector = services.GetService<IContentProtector>();
+
+            SearchManager = services.GetService<ISearchManager>();
+            IndexManager = services.GetService<IIndexManager>();
+            IndexPopulator = services.GetService<IIndexPopulator>();
+
+            ClusterChannelProvider = services.GetService<IClusterChannel>();
+            Retrier = services.GetService<IRetrier>();
+            MultiFactorAuthenticationProvider = services.GetService<IMultiFactorAuthenticationProvider>();
+        }
+
         /// <summary>
         /// Lets you access the replaceable providers in the system. This instance may be replaced 
         /// by a derived special implementation that stores instances on a thread context 
         /// for testing purposes.
         /// </summary>
-        public static Providers Instance { get; set; } = new Providers();
+        public static Providers Instance { get; set; }
 
-        //===================================================================================== Named providers
+        /* ===================================================================================== Named providers */
 
-        #region private Lazy<IEventLogger> _eventLogger = new Lazy<IEventLogger>
+        public IEventPropertyCollector PropertyCollector { get; }
+        public IAuditEventWriter AuditEventWriter { get; }
+        public IMessageProvider SecurityMessageProvider { get; }
+        public SecurityHandler SecurityHandler { get; }
+        public IPasswordHashProvider PasswordHashProvider { get; }
+        public IPasswordHashProviderForMigration PasswordHashProviderForMigration { get; }
+        public IContentNamingProvider ContentNamingProvider { get; }
+        public IPreviewProvider PreviewProvider { get; }
+        public ElevatedModificationVisibilityRule ElevatedModificationVisibilityRuleProvider { get; }
+        public ISnCache CacheProvider { get; }
+        public IApplicationCache ApplicationCacheProvider { get; }
+        public IPermissionFilterFactory PermissionFilterFactory { get; }
+        public IIndexDocumentProvider IndexDocumentProvider { get; }
+        public StorageSchema StorageSchema { get; }
+        public ICompatibilitySupport CompatibilitySupport { get; }
+        public IContentProtector ContentProtector { get; }
+        public ITreeLockController TreeLock { get; }
+        public ITaskManager TaskManager { get; }
 
-        private Lazy<IEventLogger> _eventLogger = new Lazy<IEventLogger>(() =>
-            string.IsNullOrEmpty(EventLoggerClassName)
-                ? new SnEventLogger(Logging.EventLogName, Logging.EventLogSourceName)
-                : CreateProviderInstance<IEventLogger>(EventLoggerClassName, "EventLogger"));
-        public virtual IEventLogger EventLogger
-        {
-            get => _eventLogger.Value;
-            set { _eventLogger = new Lazy<IEventLogger>(() => value); }
-        }
+
+        public DataProvider DataProvider { get; }
+        public IDataStore DataStore { get; }
+        public ISecurityDataProvider SecurityDataProvider { get; }
+        public ISearchManager SearchManager { get; }
+        public IIndexManager IndexManager { get; }
+        public IIndexPopulator IndexPopulator { get; }
+
+        public IRetrier Retrier { get; }
+
+        public IMultiFactorAuthenticationProvider MultiFactorAuthenticationProvider { get; }
+
+        /* ========================================================= Need to refactor */
+
+        public IEventLogger EventLogger { get; set; }
+
+        #region IBlobStorageMetaDataProvider
+
+        public virtual IBlobStorageMetaDataProvider BlobMetaDataProvider { get; set; }
+
         #endregion
 
-        #region private Lazy<IEventPropertyCollector> _propertyCollector = new Lazy<IEventPropertyCollector>
+        #region IBlobProviderSelector
 
-        private Lazy<IEventPropertyCollector> _propertyCollector = new Lazy<IEventPropertyCollector>(() =>
-            string.IsNullOrEmpty(PropertyCollectorClassName)
-                ? new EventPropertyCollector()
-                : CreateProviderInstance<IEventPropertyCollector>(PropertyCollectorClassName, "PropertyCollector"));
-        public virtual IEventPropertyCollector PropertyCollector
-        {
-            get => _propertyCollector.Value;
-            set { _propertyCollector = new Lazy<IEventPropertyCollector>(() => value); }
-        }
+        public virtual IBlobProviderSelector BlobProviderSelector { get; set; }
+
         #endregion
 
-        #region private Lazy<DataProvider> _dataProvider = new Lazy<DataProvider>
-        private Lazy<DataProvider> _dataProvider = new Lazy<DataProvider>(() =>
-        {
-            var dbp = CreateProviderInstance<DataProvider>(DataProviderClassName, "DataProvider");
-            
-            CommonComponents.TransactionFactory = dbp;
+        #region BlobStorage
+        
+        /// <summary>
+        /// Legacy property for old APIs.
+        /// </summary>
+        public IBlobStorage BlobStorage { get; set; }
 
-            return dbp;
-        });
-        public virtual DataProvider DataProvider
-        {
-            get { return _dataProvider.Value; }
-            set { _dataProvider = new Lazy<DataProvider>(() => value); }
-        }
         #endregion
 
-        #region private Lazy<IBlobStorageMetaDataProvider> _blobMetaDataProvider = new Lazy<IBlobStorageMetaDataProvider>
-        private Lazy<IBlobStorageMetaDataProvider> _blobMetaDataProvider =
-            new Lazy<IBlobStorageMetaDataProvider>(() =>
+        public void ResetBlobProviders(ConnectionStringOptions connectionStrings)
+        {
+            BlobStorage = null;
+            BlobProviderSelector = null;
+            BlobMetaDataProvider = null;
+            BlobProviders.Clear();
+
+            // add default internal blob provider
+            BlobProviders.AddProvider(new BuiltInBlobProvider(Options.Create(DataOptions.GetLegacyConfiguration()),
+                Options.Create(connectionStrings), Retrier));
+        }
+
+        public void InitializeBlobProviders(ConnectionStringOptions connectionStrings)
+        {
+            // add built-in provider manually if necessary
+            if (!BlobProviders.Values.Any(bp => bp is IBuiltInBlobProvider))
             {
-                var blobMetaClassName = BlobStorage.MetadataProviderClassName;
-                return string.IsNullOrEmpty(blobMetaClassName)
-                    ? new MsSqlBlobMetaDataProvider()
-                    : CreateProviderInstance<IBlobStorageMetaDataProvider>(blobMetaClassName, "BlobMetaDataProvider");
-            });
-        public virtual IBlobStorageMetaDataProvider BlobMetaDataProvider
-        {
-            get { return _blobMetaDataProvider.Value; }
-            set { _blobMetaDataProvider = new Lazy<IBlobStorageMetaDataProvider>(() => value); }
-        }
-        #endregion
+                BlobProviders.AddProvider(new BuiltInBlobProvider(Options.Create(DataOptions.GetLegacyConfiguration()),
+                    Options.Create(connectionStrings), Retrier));
+            }
 
-        #region private Lazy<IBlobProviderSelector> _blobProviderSelector = new Lazy<IBlobProviderSelector>
-        private Lazy<IBlobProviderSelector> _blobProviderSelector =
-            new Lazy<IBlobProviderSelector>(() => new BuiltInBlobProviderSelector());
-        public virtual IBlobProviderSelector BlobProviderSelector
-        {
-            get { return _blobProviderSelector.Value; }
-            set { _blobProviderSelector = new Lazy<IBlobProviderSelector>(() => value); }
-        }
-        #endregion
+            BlobProviderSelector ??= new BuiltInBlobProviderSelector(BlobProviders,
+                null, Options.Create(BlobStorageOptions.GetLegacyConfiguration()));
 
-        #region private Lazy<ISearchEngine> _searchEngine = new Lazy<ISearchEngine>
-        private Lazy<ISearchEngine> _searchEngine =
-            new Lazy<ISearchEngine>(() => CreateProviderInstance<ISearchEngine>(SearchEngineClassName, "SearchEngine"));
-        public virtual ISearchEngine SearchEngine
-        {
-            get { return _searchEngine.Value; }
-            set { _searchEngine = new Lazy<ISearchEngine>(() => value); }
+            BlobMetaDataProvider ??= new MsSqlBlobMetaDataProvider(BlobProviders,
+                Options.Create(DataOptions.GetLegacyConfiguration()),
+                Options.Create(BlobStorageOptions.GetLegacyConfiguration()),
+                Options.Create(connectionStrings), Retrier);
+
+            // assemble the main api instance if necessary (for tests)
+            BlobStorage ??= new ContentRepository.Storage.Data.BlobStorage(
+                BlobProviders,
+                BlobProviderSelector,
+                BlobMetaDataProvider,
+                Options.Create(BlobStorageOptions.GetLegacyConfiguration()));
+
+            BlobStorage.Initialize();
         }
-        #endregion
+
+        private IBlobProviderStore _blobProviders;
+        public IBlobProviderStore BlobProviders
+        {
+            get
+            {
+                if (_blobProviders == null)
+                    //UNDONE: Delete initialization and use something like this everywhere: repositoryBuilder.UseBlobProviderStore(services.GetRequiredService<IBlobProviderStore>())
+                    _blobProviders = new BlobProviderStore(Array.Empty<IBlobProvider>());
+                return _blobProviders;
+            }
+            set => _blobProviders = value;
+        }
+
+        public ISearchEngine SearchEngine { get; set; }
 
         #region private Lazy<AccessProvider> _accessProvider = new Lazy<AccessProvider>
         private Lazy<AccessProvider> _accessProvider = new Lazy<AccessProvider>(() =>
@@ -164,7 +214,7 @@ namespace SenseNet.Configuration
             // We have to skip logging the creation of this provider, because the logger
             // itself tries to use the access provider when collecting event properties,
             // which would lead to a circular reference.
-            var provider = CreateProviderInstance<AccessProvider>(AccessProviderClassName, "AccessProvider", true);
+            var provider = CreateProviderInstance<AccessProvider>(AccessProviderClassName, "AccessProvider");
             provider.InitializeInternal();
 
             return provider;
@@ -176,61 +226,6 @@ namespace SenseNet.Configuration
         }
         #endregion
 
-        #region private Lazy<ISecurityDataProvider> _securityDataProvider = new Lazy<ISecurityDataProvider>
-        private Lazy<ISecurityDataProvider> _securityDataProvider = new Lazy<ISecurityDataProvider>(() =>
-        {
-            ISecurityDataProvider securityDataProvider = null;
-
-            try
-            {
-                securityDataProvider = (ISecurityDataProvider)TypeResolver.CreateInstance(SecurityDataProviderClassName);
-            }
-            catch (TypeNotFoundException)
-            {
-                throw new ConfigurationException($"Security data provider implementation not found: {SecurityDataProviderClassName}");
-            }
-            catch (InvalidCastException)
-            {
-                throw new ConfigurationException($"Invalid security data provider implementation: {SecurityDataProviderClassName}");
-            }
-
-            SnLog.WriteInformation("SecurityDataProvider created: " + securityDataProvider.GetType().FullName);
-
-            return securityDataProvider;
-        });
-        public virtual ISecurityDataProvider SecurityDataProvider
-        {
-            get { return _securityDataProvider.Value; }
-            set { _securityDataProvider = new Lazy<ISecurityDataProvider>(() => value); }
-        }
-        #endregion
-
-        #region private Lazy<IMessageProvider> _securityMessageProvider = new Lazy<IMessageProvider>
-        private Lazy<IMessageProvider> _securityMessageProvider = new Lazy<IMessageProvider>(() =>
-        {
-            var msgProvider = CreateProviderInstance<IMessageProvider>(SecurityMessageProviderClassName,
-                "SecurityMessageProvider");
-            msgProvider.Initialize();
-
-            return msgProvider;
-        });
-        public virtual IMessageProvider SecurityMessageProvider
-        {
-            get { return _securityMessageProvider.Value; }
-            set { _securityMessageProvider = new Lazy<IMessageProvider>(() => value); }
-        }
-        #endregion
-
-        #region private Lazy<ElevatedModificationVisibilityRule> _elevatedModificationVisibilityRuleProvider
-        private Lazy<ElevatedModificationVisibilityRule> _elevatedModificationVisibilityRuleProvider =
-            new Lazy<ElevatedModificationVisibilityRule>(() => CreateProviderInstance<ElevatedModificationVisibilityRule>(
-                ElevatedModificationVisibilityRuleProviderName, "ElevatedModificationVisibilityRule"));
-        public virtual ElevatedModificationVisibilityRule ElevatedModificationVisibilityRuleProvider
-        {
-            get { return _elevatedModificationVisibilityRuleProvider.Value; }
-            set { _elevatedModificationVisibilityRuleProvider = new Lazy<ElevatedModificationVisibilityRule>(() => value); }
-        }
-        #endregion
 
         #region private Lazy<MembershipExtenderBase> _membershipExtender = new Lazy<MembershipExtenderBase>
         private Lazy<MembershipExtenderBase> _membershipExtender = new Lazy<MembershipExtenderBase>(() => CreateProviderInstance<MembershipExtenderBase>(MembershipExtenderClassName, "MembershipExtender"));
@@ -241,81 +236,7 @@ namespace SenseNet.Configuration
         }
         #endregion
 
-        #region private Lazy<ICache> _cacheProvider = new Lazy<ICache>
-        private Lazy<ISnCache> _cacheProvider =
-            new Lazy<ISnCache>(() =>
-            {
-                var cache = CreateProviderInstance<ISnCache>(CacheClassName, "CacheProvider");
-                cache.Events = new CacheEventStore();
-                return cache;
-            });
-        public virtual ISnCache CacheProvider
-        {
-            get => _cacheProvider.Value;
-            set { _cacheProvider = new Lazy<ISnCache>(() =>
-            {
-                value.Events = new CacheEventStore();
-                return value;
-            }); }
-        }
-        #endregion
-
-        #region private Lazy<IApplicationCache> _applicationCacheProvider = new Lazy<IApplicationCache>
-        private Lazy<IApplicationCache> _applicationCacheProvider =
-            new Lazy<IApplicationCache>(() => CreateProviderInstance<IApplicationCache>(ApplicationCacheClassName, "ApplicationCacheProvider"));
-        public virtual IApplicationCache ApplicationCacheProvider
-        {
-            get { return _applicationCacheProvider.Value; }
-            set { _applicationCacheProvider = new Lazy<IApplicationCache>(() => value); }
-        }
-        #endregion
-
-        #region private Lazy<IClusterChannel> _clusterChannelProvider = new Lazy<IClusterChannel>
-        private Lazy<IClusterChannel> _clusterChannelProvider = new Lazy<IClusterChannel>(() =>
-        {
-            IClusterChannel provider;
-
-            try
-            {
-                provider = (IClusterChannel)TypeResolver.CreateInstance(ClusterChannelProviderClassName, 
-                    new BinaryMessageFormatter(), ClusterMemberInfo.Current);
-            }
-            catch (TypeNotFoundException)
-            {
-                throw new ConfigurationException($"ClusterChannel implementation does not exist: {ClusterChannelProviderClassName}");
-            }
-            catch (InvalidCastException)
-            {
-                throw new ConfigurationException($"Invalid ClusterChannel implementation: {ClusterChannelProviderClassName}");
-            }
-            
-            provider.Start();
-
-            SnTrace.Messaging.Write("Cluster channel created: " + ClusterChannelProviderClassName);
-            SnLog.WriteInformation($"ClusterChannel created: {ClusterChannelProviderClassName}");
-
-            return provider;
-        });
-        public virtual IClusterChannel ClusterChannelProvider
-        {
-            get { return _clusterChannelProvider.Value; }
-            set { _clusterChannelProvider = new Lazy<IClusterChannel>(() => value); }
-        }
-
-        #endregion
-
-        #region private Lazy<IPermissionFilterFactory> _permissionFilterFactory = new Lazy<IPermissionFilterFactory>
-        private Lazy<IPermissionFilterFactory> _permissionFilterFactory = new Lazy<IPermissionFilterFactory>(() =>
-        {
-            return new PermissionFilterFactory();
-        });
-        public virtual IPermissionFilterFactory PermissionFilterFactory
-        {
-            get { return _permissionFilterFactory.Value; }
-            set { _permissionFilterFactory = new Lazy<IPermissionFilterFactory>(() => value); }
-        }
-
-        #endregion
+        public IClusterChannel ClusterChannelProvider { get; set; }
 
         #region NodeObservers
         private Lazy<NodeObserver[]> _nodeObservers = new Lazy<NodeObserver[]>(() =>
@@ -341,27 +262,42 @@ namespace SenseNet.Configuration
             }
 
             var activeObserverNames = activeObservers.Select(x => x.GetType().FullName).ToArray();
-            SnLog.WriteInformation("NodeObservers are instantiated. ", EventId.RepositoryLifecycle,
-                properties: new Dictionary<string, object> { { "Types", string.Join(", ", activeObserverNames) } });
+            Instance?._logger.LogInformation($"NodeObservers are instantiated. Types: {string.Join(", ", activeObserverNames)}");
 
             return activeObservers;
         });
         public NodeObserver[] NodeObservers
         {
             get { return _nodeObservers.Value; }
-            set { _nodeObservers = new Lazy<NodeObserver[]>(() => value); }
+            set
+            {
+                _nodeObservers = new Lazy<NodeObserver[]>(() => value);
+
+                SnLog.WriteInformation("NodeObservers have changed. ", EventId.RepositoryLifecycle,
+                    properties: new Dictionary<string, object>
+                        {{"Types", string.Join(", ", value?.Select(n => n.GetType().Name) ?? Array.Empty<string>())}});
+            }
         }
         #endregion
 
-        internal NodeTypeManager NodeTypeManeger { get; set; }
+        private IEventDistributor _eventDistributor = new DevNullEventDistributor();
+        public IEventDistributor EventDistributor
+        {
+            get => _eventDistributor;
+            set => _eventDistributor = value ?? new DevNullEventDistributor();
+        }
 
-        public ICompatibilitySupport CompatibilitySupport { get; set; } =
-            new EmptyCompatibilitySupport();
+        public IEventProcessor AuditLogEventProcessor { get; set; }
+        public List<IEventProcessor> AsyncEventProcessors { get; } = new List<IEventProcessor>();
+
 
         //===================================================================================== General provider API
 
         private readonly Dictionary<string, object> _providersByName = new Dictionary<string, object>();
+        public Dictionary<string, object> ProvidersByName => _providersByName;
+
         private readonly Dictionary<Type, object> _providersByType = new Dictionary<Type, object>();
+        public Dictionary<Type, object> ProvidersByType => _providersByType;
 
         public virtual T GetProvider<T>(string name) where T: class 
         {
@@ -394,12 +330,17 @@ namespace SenseNet.Configuration
         {
             _providersByName[providerName] = provider;
         }
-        public virtual void SetProvider(Type providerType, object provider)
+        [Obsolete]
+        public void SetProvider(Type providerType, object provider)
+        {
+            SetProviderPrivate(providerType, provider);
+        }
+        private void SetProviderPrivate(Type providerType, object provider)
         {
             _providersByType[providerType] = provider;
         }
 
-        private static T CreateProviderInstance<T>(string className, string providerName, bool skipLog = false)
+        private static T CreateProviderInstance<T>(string className, string providerName)
         {
             T provider;
 
@@ -416,13 +357,18 @@ namespace SenseNet.Configuration
                 throw new ConfigurationException($"Invalid {providerName} implementation: {className}");
             }
 
-            // in some cases the logger is not available yet
-            if (skipLog)
-                SnTrace.System.Write($"{providerName} created: {className}");
-            else
-                SnLog.WriteInformation($"{providerName} created: {className}");
+            SnTrace.System.Write($"{providerName} created: {className}");
 
             return provider;
+        }
+
+        /* =================================================================================== COMPONENTS FOR PATCHES */
+        /* =================================================================================== Experimental feature   */
+
+        public List<object> Components { get; } = new List<object>();
+        public void AddComponent(object instance)
+        {
+            Components.Add(instance);
         }
     }
 }

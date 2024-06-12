@@ -1,20 +1,24 @@
 ﻿using SenseNet.ContentRepository;
 using SenseNet.ContentRepository.Fields;
-using SenseNet.ContentRepository.Storage.Data;
-using System.Data;
 using System.Linq;
+using System.Threading;
+using SenseNet.ContentRepository.Storage.Data.MsSqlClient;
 using SenseNet.ContentRepository.Storage.Security;
+using Task = System.Threading.Tasks.Task;
+using SenseNet.Configuration;
+using SenseNet.Diagnostics;
+using SenseNet.Tools;
 
+// ReSharper disable once ArrangeThisQualifier
+
+// ReSharper disable once CheckNamespace
 namespace SenseNet.Packaging.Steps.Internal
 {
     public class RefreshAspectReferences : Step
     {
-        public override string ElementName
-        {
-            get { return "Internal." + this.GetType().Name; }
-        }
+        public override string ElementName => "Internal." + this.GetType().Name;
 
-        private const string SCRIPT = @"
+        private const string Script = @"
 SELECT DISTINCT SrcId
 FROM ReferencesInfoView
 WHERE RelType = 'Aspects' and TargetId in
@@ -25,10 +29,14 @@ WHERE RelType = 'Aspects' and TargetId in
         {
             var count = 0;
 
-            using (var proc = DataProvider.Instance.CreateDataProcedure(SCRIPT))
+            using var op = SnTrace.Database.StartOperation("RefreshAspectReferences: " +
+                $"Execute: Script:{Script.ToTrace()}");
+
+            //TODO: [DIREF] get options from DI through constructor
+            using (var ctx = new MsSqlDataContext(context.ConnectionStrings.Repository,
+                       DataOptions.GetLegacyConfiguration(), GetService<IRetrier>(), CancellationToken.None))
             {
-                proc.CommandType = CommandType.Text;
-                using (var reader = proc.ExecuteReader())
+                ctx.ExecuteReaderAsync(Script, async (reader, cancel) =>
                 {
                     do
                     {
@@ -37,37 +45,37 @@ WHERE RelType = 'Aspects' and TargetId in
 
                         using (new SystemAccount())
                         {
-                            while (reader.Read())
+                            while (await reader.ReadAsync(cancel).ConfigureAwait(false))
                             {
                                 Operate(reader.GetInt32(0));
                                 count++;
-                            } 
+                            }
                         }
 
                     } while (reader.NextResult());
-                }
+
+                    return Task.FromResult(0);
+                }).GetAwaiter().GetResult();
             }
 
-            if (count < 1)
-                Logger.LogMessage("No content was found with aspect reference field.");
-            else
-                Logger.LogMessage(string.Format("Aspect references were updated on {0} content.", count));
+            Logger.LogMessage(count < 1
+                ? "No content was found with aspect reference field."
+                : $"Aspect references were updated on {count} content.");
+
+            op.Successful = true;
         }
         private void Operate(int id)
         {
             var content = Content.Load(id);
 
-            var gc = content.ContentHandler as GenericContent;
-            if (gc == null)
+            if (!(content.ContentHandler is GenericContent))
                 return;
 
             // iterate through reference aspect fields and re-set them
             foreach (var field in content.AspectFields.Values.Where(f => f is ReferenceField))
-            {
                 content[field.Name] = content[field.Name];
-            }
 
-            content.SaveSameVersion();
+            content.SaveSameVersionAsync(CancellationToken.None).GetAwaiter().GetResult();
         }
     }
 }

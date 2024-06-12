@@ -1,6 +1,8 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
+using SenseNet.Configuration;
 using SenseNet.ContentRepository.Search;
 using SenseNet.ContentRepository.Storage.Search;
 using SenseNet.ContentRepository.Storage.Security;
@@ -144,7 +146,7 @@ namespace SenseNet.ContentRepository.Storage
             switch (_hint)
             {
                 case ExecutionHint.None:
-                    return SearchManager.ContentQueryIsAllowed
+                    return Providers.Instance.SearchManager.ContentQueryIsAllowed
                         ? QueryChildrenFromIndex(thisId)
                         : QueryChildrenFromDatabase(thisId);
                 case ExecutionHint.ForceRelationalEngine:
@@ -160,13 +162,14 @@ namespace SenseNet.ContentRepository.Storage
             var q = $"ParentId:{thisId}";
             if (_filter != null)
                 q += $" +({_filter})";
-            return SearchManager.ExecuteContentQuery(q, QuerySettings.AdminSettings);
+            return Providers.Instance.SearchManager.ExecuteContentQuery(q, QuerySettings.AdminSettings);
         }
         private QueryResult QueryChildrenFromDatabase(int thisId)
         {
             if (_filter != null)
                 throw new NotSupportedException("Cannot query the children from database with filter.");
-            var idArray = DataProvider.Current.GetChildrenIdentfiers(thisId);
+            var idArray = Providers.Instance.DataStore
+                .GetChildrenIdentifiersAsync(thisId, CancellationToken.None).GetAwaiter().GetResult();
             return new QueryResult(idArray);
         }
 

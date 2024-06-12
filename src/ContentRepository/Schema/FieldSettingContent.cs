@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Threading;
 using SenseNet.Configuration;
 using SenseNet.ContentRepository.Storage;
 using SenseNet.Tools;
@@ -158,20 +159,37 @@ namespace SenseNet.ContentRepository.Schema
         /// </summary>
         public override void Save(SavingMode mode)
         {
+            SaveAsync(mode, CancellationToken.None).GetAwaiter().GetResult();
+        }
+        /// <summary>
+        /// Asynchronously saves the <see cref="Schema.FieldSetting"/> data to the Content List definition xml. This method
+        /// does not call the base Save implementation, no standalone field setting content is saved into the
+        /// Content Repository.
+        /// </summary>
+        public override System.Threading.Tasks.Task SaveAsync(SavingMode mode, CancellationToken cancel)
+        {
             SaveFieldSetting();
+            return System.Threading.Tasks.Task.CompletedTask;
         }
 
         /// <summary>
         /// Deletes the <see cref="Schema.FieldSetting"/> data from the Content List definition xml. This method
         /// does not call the base Delete implementation.
         /// </summary>
+        [Obsolete("Use async version instead", true)]
         public override void Delete()
+        {
+            DeleteAsync(CancellationToken.None).GetAwaiter().GetResult();
+        }
+        public override System.Threading.Tasks.Task DeleteAsync(CancellationToken cancel)
         {
             // remove column from views
             var ivm = Providers.Instance.GetProvider<IViewManager>("ViewManager");
             ivm?.RemoveFieldFromViews(this.FieldSetting, this.ContentList);
 
             this.ContentList.DeleteField(this.FieldSetting);
+
+            return System.Threading.Tasks.Task.CompletedTask;
         }
 
         private void SaveFieldSetting()
@@ -323,7 +341,7 @@ namespace SenseNet.ContentRepository.Schema
 
             var nt = fieldSetting.GetType();
 
-            while (ActiveSchema.NodeTypes[nt.Name] == null)
+            while (Providers.Instance.StorageSchema.NodeTypes[nt.Name] == null)
             {
                 nt = nt.BaseType;
             }

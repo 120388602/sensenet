@@ -6,6 +6,8 @@
   <AllowedChildTypes>
     Blog,DocumentLibrary,EventList,MemoList,LinkList,TaskList,ImageLibrary,Posts,CustomList
   </AllowedChildTypes>
+  <Categories>HideByDefault</Categories>
+  <SystemType>true</SystemType>
   <Fields>
     <Field name="IsWallContainer" type="Boolean">
       <Configuration>

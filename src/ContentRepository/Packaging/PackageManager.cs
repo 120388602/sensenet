@@ -7,28 +7,37 @@ using System.Xml;
 using System.Diagnostics;
 using SenseNet.ContentRepository;
 using System.Reflection;
+using System.Threading;
+using Microsoft.Extensions.DependencyInjection;
+using SenseNet.Configuration;
 using SenseNet.ContentRepository.Storage;
 using SenseNet.ContentRepository.Storage.Data;
-using SenseNet.ContentRepository.Storage.Data.SqlClient;
+using SenseNet.Diagnostics;
 using SenseNet.Packaging.Steps;
 
+// ReSharper disable once CheckNamespace
 namespace SenseNet.Packaging
 {
     public class PackageManager
     {
         public const string SANDBOXDIRECTORYNAME = "run";
 
-        internal static IPackagingDataProviderExtension Storage => DataProvider.GetExtension<IPackagingDataProviderExtension>();
+        internal static IPackagingDataProvider Storage => Providers.Instance.Services.GetRequiredService<IPackagingDataProvider>();
 
-        public static PackagingResult Execute(string packagePath, string targetPath, int currentPhase, string[] parameters, TextWriter console)
+        public static PackagingResult Execute(string packagePath, string targetPath, int currentPhase,
+            string[] parameters, TextWriter console, RepositoryBuilder builder,
+            bool editConnectionString = false)
         {
-            // Workaround for setting the packaging db provider: in normal cases this happens
-            // when the repository starts, but in case of package execution the repository 
-            // is not yet started sometimes.
-            if (null == DataProvider.GetExtension<IPackagingDataProviderExtension>())
-                DataProvider.Instance.SetExtension(typeof(IPackagingDataProviderExtension), new SqlPackagingDataProvider());
-
             var packageParameters = parameters?.Select(PackageParameter.Parse).ToArray() ?? new PackageParameter[0];
+
+            return Execute(packagePath, targetPath, currentPhase, packageParameters, console, builder,
+                editConnectionString);
+        }
+        public static PackagingResult Execute(string packagePath, string targetPath, int currentPhase, 
+            PackageParameter[] parameters, TextWriter console, 
+            RepositoryBuilder builder, bool editConnectionString = false)
+        {
+            var packageParameters = parameters ?? new PackageParameter[0];
             var forcedReinstall = "true" == (packageParameters
                 .FirstOrDefault(p => p.PropertyName.ToLowerInvariant() == "forcedreinstall")?
                 .Value?.ToLowerInvariant() ?? "");
@@ -43,7 +52,8 @@ namespace SenseNet.Packaging
             {
                 try
                 {
-                    manifest = Manifest.Parse(files[0], currentPhase, currentPhase == 0, packageParameters, forcedReinstall);
+                    manifest = Manifest.Parse(files[0], currentPhase, currentPhase == 0, packageParameters,
+                        forcedReinstall, editConnectionString);
                     phaseCount = manifest.CountOfPhases;
                 }
                 catch (Exception e)
@@ -64,8 +74,8 @@ namespace SenseNet.Packaging
             Logger.LogTitle(String.Format("Executing phase {0}/{1}", currentPhase + 1, phaseCount));
 
             var sandboxDirectory = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
-            var executionContext = new ExecutionContext(packagePath, targetPath, Configuration.Packaging.NetworkTargets,
-                sandboxDirectory, manifest, currentPhase, manifest.CountOfPhases, packageParameters, console);
+            var executionContext = ExecutionContext.Create(packagePath, targetPath, Configuration.Packaging.NetworkTargets,
+                sandboxDirectory, manifest, currentPhase, manifest.CountOfPhases, packageParameters, console, builder);
 
             executionContext.LogVariables();
 
@@ -73,15 +83,20 @@ namespace SenseNet.Packaging
             try
             {
                 result = ExecuteCurrentPhase(manifest, executionContext);
+
+                if(manifest.SystemInstall)
+                    Providers.Instance.SecurityHandler
+                        .ReloadCacheAsync(true, CancellationToken.None)
+                        .GetAwaiter().GetResult();
             }
             finally
             {
                 if (Repository.Started())
                 {
-                    console.WriteLine("-------------------------------------------------------------");
-                    console.Write("Stopping repository ... ");
+                    console?.WriteLine("-------------------------------------------------------------");
+                    console?.Write("Stopping repository ... ");
                     Repository.Shutdown();
-                    console.WriteLine("Ok.");
+                    console?.WriteLine("Ok.");
                 }
             }
 
@@ -161,12 +176,15 @@ namespace SenseNet.Packaging
 
                 // we need to shut down messaging, because the line above uses it
                 if (!executionContext.Test)
-                    DistributedApplication.ClusterChannel.ShutDown();
+                    Providers.Instance.ClusterChannelProvider.ShutDownAsync(CancellationToken.None).GetAwaiter().GetResult();
                 else
-                    Diagnostics.SnTrace.Test.Write("DistributedApplication.ClusterChannel.ShutDown SKIPPED because it is a test context.");
+                    SnTrace.Test.Write("Providers.Instance.ClusterChannelProvider.ShutDown SKIPPED because it is a test context.");
             }
             if (!successful && !executionContext.Terminated)
                 throw new ApplicationException(String.Format(SR.Errors.PhaseFinishedWithError_1, phaseException.Message), phaseException);
+
+            if (successful && !executionContext.Terminated && manifest.PackageType == PackageType.Install)
+                Logger.LogMessage("COMPONENT INSTALLED SUCCESSFULLY: " + manifest.ComponentId);
 
             return new PackagingResult { NeedRestart = false, Successful = successful, Terminated = executionContext.Terminated && !successful, Errors = Logger.Errors };
         }
@@ -198,37 +216,49 @@ namespace SenseNet.Packaging
             Logger.LogMessage(message);
         }
 
-        private static void SaveInitialPackage(Manifest manifest)
+        internal static void SaveInitialPackage(Manifest manifest)
         {
-            var newPack = CreatePackage(manifest, ExecutionResult.Unfinished, null);
-            Storage.SavePackage(newPack);
-        }
-        private static void SavePackage(Manifest manifest, ExecutionContext executionContext, bool successful, Exception execError)
-        {
-            var executionResult = successful ? ExecutionResult.Successful : ExecutionResult.Faulty;
+            // There is a possibility that during system install the database does not exist yet,
+            // so saving a package is not possible. The package record will be saved after execution anyway.
+            if (manifest.SystemInstall)
+                return;
 
-            RepositoryVersionInfo.Reset();
+            var newPack = CreatePackage(manifest, ExecutionResult.Unfinished, null);
+            Storage.SavePackageAsync(newPack, CancellationToken.None).GetAwaiter().GetResult();
+        }
+        internal static void SavePackage(Manifest manifest, ExecutionContext executionContext, bool successful, Exception execError)
+        {
+            SavePackage(manifest, successful ? ExecutionResult.Successful : ExecutionResult.Faulty, execError);
+        }
+        internal static void SavePackage(Manifest manifest, ExecutionResult executionResult, Exception execError, bool insertOnly = false)
+        {
+            // Ensure consistency of local version-info before determining the installed packages.
+            RepositoryVersionInfo.Reset(true);
+
             var oldPacks = RepositoryVersionInfo.Instance.InstalledPackages;
             if (manifest.PackageType == PackageType.Tool)
                 oldPacks = oldPacks
                     .Where(p => p.ComponentId == manifest.ComponentId && p.PackageType == PackageType.Tool
-                    && p.ExecutionResult == ExecutionResult.Unfinished);
+                                                                      && p.ExecutionResult == ExecutionResult.Unfinished);
             else
                 oldPacks = oldPacks
                     .Where(p => p.ComponentId == manifest.ComponentId && p.ComponentVersion == manifest.Version);
             oldPacks = oldPacks.OrderBy(p => p.ExecutionDate).ToArray();
 
             var oldPack = oldPacks.LastOrDefault();
-            if (oldPack == null)
+            if (oldPack == null || insertOnly)
             {
                 var newPack = CreatePackage(manifest, executionResult, execError);
-                Storage.SavePackage(newPack);
+                Storage.SavePackageAsync(newPack, CancellationToken.None).GetAwaiter().GetResult();
             }
             else
             {
                 UpdatePackage(oldPack, manifest, executionResult, execError);
-                Storage.UpdatePackage(oldPack);
+                Storage.UpdatePackageAsync(oldPack, CancellationToken.None).GetAwaiter().GetResult();
             }
+
+            // Ensure consistency of local version-info after persisting every executed package.
+            RepositoryVersionInfo.Reset(true);
         }
         private static Package CreatePackage(Manifest manifest, ExecutionResult result, Exception execError)
         {
@@ -309,6 +339,64 @@ namespace SenseNet.Packaging
                 propertyName = rewrittenName;
             }
             return propertyName;
+        }
+
+        internal static PackagingResult ExecutePatch(string manifestXml, RepositoryBuilder repositoryBuilder)
+        {
+            try
+            {
+                var xml = new XmlDocument();
+                xml.LoadXml(manifestXml);
+                return ExecutePatch(xml, repositoryBuilder);
+            }
+            catch (XmlException ex)
+            {
+                throw new InvalidPackageException("Invalid manifest xml.", ex);
+            }
+        }
+        internal static PackagingResult ExecutePatch(XmlDocument manifestXml, RepositoryBuilder repositoryBuilder)
+        {
+            var phase = -1;
+            var errors = 0;
+            PackagingResult result;
+
+            do
+            {
+                result = ExecutePhase(manifestXml, ++phase, repositoryBuilder);
+                errors += result.Errors;
+            } while (result.NeedRestart);
+
+            result.Errors = errors;
+            return result;
+        }
+        internal static PackagingResult ExecutePhase(XmlDocument manifestXml, int phase, RepositoryBuilder repositoryBuilder)
+        {
+            var manifest = Manifest.Parse(manifestXml, phase, true, new PackageParameter[0]);
+
+            // Fill context with indexing folder, repo start settings (builder), providers and other 
+            // parameters necessary for on-the-fly steps to run.
+            var executionContext = ExecutionContext.Create("packagePath", "targetPath", 
+                new string[0], "sandboxPath", manifest, phase, manifest.CountOfPhases, 
+                null, null, repositoryBuilder);
+
+            PackagingResult result; 
+
+            try
+            {
+                result = ExecuteCurrentPhase(manifest, executionContext);
+            }
+            finally
+            {
+                if (Repository.Started())
+                {
+                    SnTrace.System.Write("PackageManager: stopping repository ... ");
+                    Repository.Shutdown();
+                }
+            }
+
+            RepositoryVersionInfo.Reset();
+
+            return result;
         }
     }
 }

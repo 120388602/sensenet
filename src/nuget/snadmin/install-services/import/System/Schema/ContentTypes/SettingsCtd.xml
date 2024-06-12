@@ -15,6 +15,13 @@
         <VisibleNew>Hide</VisibleNew>
       </Configuration>
     </Field>
+    <Field name="Description" type="RichText">
+      <Configuration>
+        <VisibleBrowse>Hide</VisibleBrowse>
+        <VisibleEdit>Show</VisibleEdit>
+        <VisibleNew>Show</VisibleNew>
+      </Configuration>
+    </Field>
     <Field name="Version" type="Version">
       <Configuration>
         <VisibleBrowse>Hide</VisibleBrowse>

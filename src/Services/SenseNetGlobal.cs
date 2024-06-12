@@ -20,6 +20,9 @@ using SenseNet.Configuration;
 using SenseNet.Portal;
 using SenseNet.Tools;
 using System.Security;
+using SenseNet.ContentRepository.Security;
+using SenseNet.Tools.Diagnostics;
+using SenseNet.Extensions.DependencyInjection;
 
 namespace SenseNet.Services
 {
@@ -149,7 +152,12 @@ namespace SenseNet.Services
                     IsWebContext = true,
                 };
 
+                Providers.Instance.PropertyCollector = new ContextEventPropertyCollector();
                 Providers.Instance.CompatibilitySupport = new CompatibilitySupport();
+
+                // use real users in a web environment if not configured
+                if (Providers.Instance.AccessProvider is DesktopAccessProvider)
+                    repositoryBuilder.UseAccessProvider(new UserAccessProvider());
 
                 BuildRepository(repositoryBuilder);
 

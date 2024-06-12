@@ -3,15 +3,18 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Diagnostics;
+using Newtonsoft.Json;
 using SenseNet.Configuration;
 using SenseNet.Tools;
 
+// ReSharper disable once CheckNamespace
 namespace SenseNet.ContentRepository.Storage
 {
     public class AssemblyInfo
     {
         public string Name { get; set; }
         public bool IsDynamic { get; set; }
+        [JsonIgnore]
         public string CodeBase { get; set; }
         public string Version { get; set; }
     }
@@ -184,23 +187,23 @@ namespace SenseNet.ContentRepository.Storage
             return null;
         }
 
-        [Obsolete("Use RepositoryBuiler class instead.", true)]
+        [Obsolete("Use RepositoryBuilder class instead.", true)]
         public static void Initialize(IDictionary<Type, Type[]> configuredProviders)
         {
             throw new SnNotSupportedException("This method is not supported anymore.");
         }
 
-        [Obsolete("Use RepositoryBuiler class instead.", true)]
+        [Obsolete("Use RepositoryBuilder class instead.", true)]
         public static T GetProviderInstance<T>()
         {
             throw new SnNotSupportedException("This method is not supported anymore.");
         }
-        [Obsolete("Use RepositoryBuiler class instead.", true)]
+        [Obsolete("Use RepositoryBuilder class instead.", true)]
         public static Type[] GetProviderTypes()
         {
             throw new SnNotSupportedException("This method is not supported anymore.");
         }
-        [Obsolete("Use RepositoryBuiler class instead.", true)]
+        [Obsolete("Use RepositoryBuilder class instead.", true)]
         public static T[] GetProviderInstances<T>()
         {
             throw new SnNotSupportedException("This method is not supported anymore.");

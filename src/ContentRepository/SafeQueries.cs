@@ -60,6 +60,8 @@ namespace SenseNet.ContentRepository
 
         /// <summary>Returns with the following query: "+InTree:@0 +TypeIs:User +LoginName:@1"</summary>
         public static string UsersByLoginName { get { return "+InTree:@0 +TypeIs:User +LoginName:@1"; } }
+        /// <summary>Returns the following query: "+InTree:@0 +TypeIs:User"</summary>
+        public static string UsersInSubtree => "+InTree:@0 +TypeIs:User";
 
         /// <summary>Returns with the following query: "TypeIs:File AND InTree:@0 .SORT:CreationDate"</summary>
         public static string FilesInTree { get { return "TypeIs:File AND InTree:@0 .SORT:CreationDate"; } }
@@ -78,5 +80,8 @@ namespace SenseNet.ContentRepository
 
         /// <summary>Returns with the following query: "+TypeIs:Workflow +RelatedContent:@0 .AUTOFILTERS:OFF"</summary>
         public static string WorkflowsByRelatedContent { get { return "+TypeIs:Workflow +RelatedContent:@0 .AUTOFILTERS:OFF"; } }
+        
+        /// <summary>Returns a query for all content types.</summary>
+        public static string ContentTypes => $"+InTree:{Repository.ContentTypesFolderPath} .AUTOFILTERS:OFF";
     }
 }

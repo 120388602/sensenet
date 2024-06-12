@@ -6,6 +6,7 @@ using SenseNet.ContentRepository.Schema;
 using SenseNet.Portal.Virtualization;
 using System.Xml;
 using System.Linq;
+using System.Threading;
 using SenseNet.ContentRepository;
 using SenseNet.ContentRepository.Workspaces;
 using SenseNet.ContentRepository.Fields;
@@ -42,7 +43,7 @@ namespace SenseNet.Portal
         protected Site(NodeToken nt) : base(nt) { }
 
         /// <summary>
-        /// Gets or stes the temporary language code of this <see cref="Site"/> (e.g. "en-us").
+        /// Gets or sets the temporary language code of this <see cref="Site"/> (e.g. "en-us").
         /// </summary>
         [RepositoryProperty("PendingUserLang")]
         public string PendingUserLang
@@ -175,7 +176,7 @@ namespace SenseNet.Portal
             base.Save(mode);
 
             var action = new PortalContext.ReloadSiteListDistributedAction();
-            action.Execute();
+            action.ExecuteAsync(CancellationToken.None).GetAwaiter().GetResult();
         }
 
         private void ValidateStartPage()
@@ -193,7 +194,7 @@ namespace SenseNet.Portal
             base.Delete();
 
             var action = new PortalContext.ReloadSiteListDistributedAction();
-            action.Execute();
+            action.ExecuteAsync(CancellationToken.None).GetAwaiter().GetResult();
         }
 
         /// <inheritdoc />
@@ -202,7 +203,7 @@ namespace SenseNet.Portal
             base.ForceDelete();
 
             var action = new PortalContext.ReloadSiteListDistributedAction();
-            action.Execute();
+            action.ExecuteAsync(CancellationToken.None).GetAwaiter().GetResult();
         }
 
         private void RefreshUrlList()
@@ -225,7 +226,7 @@ namespace SenseNet.Portal
             foreach (var url in UrlList.Keys.Where(url => PortalContext.Sites.Keys.Count(k => k == url && PortalContext.Sites[k].Id != this.Id) > 0))
                 throw new ApplicationException(SNSR.GetString(SNSR.Exceptions.Site.UrlAlreadyUsed_2, url, PortalContext.Sites[url].DisplayName));
         }
-        private bool IsValidSiteUrl(string url)
+        internal static bool IsValidSiteUrl(string url)
         {
             var absUrl = "http://" + url;
             if (!Uri.IsWellFormedUriString(absUrl, UriKind.Absolute))
@@ -233,7 +234,7 @@ namespace SenseNet.Portal
             try
             {
                 var uri = new Uri(absUrl);
-                if (uri.Authority != url)
+                if (string.Compare(uri.Authority, url, StringComparison.InvariantCultureIgnoreCase) != 0)
                     return false;
             }
             catch
@@ -277,7 +278,7 @@ namespace SenseNet.Portal
         }
         /// <summary>
         /// Returns parsed data of the given URL list that can be a JSON or an XML fragment.
-        /// For exmple:
+        /// For example:
         ///   &lt;Url authType="Forms"&gt;localhost:1315/&lt;/Url&gt;
         ///   &lt;Url authType="Windows"&gt;name.server.xy&lt;/Url&gt;
         /// or JSON:
@@ -332,7 +333,7 @@ namespace SenseNet.Portal
         }
         /// <summary>
         /// Returns the XML representation of the given URL list.
-        /// For exmple:
+        /// For example:
         ///   &lt;Url authType="Forms"&gt;localhost:1315/&lt;/Url&gt;
         ///   &lt;Url authType="Windows"&gt;name.server.xy&lt;/Url&gt;
         /// </summary>

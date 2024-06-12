@@ -39,7 +39,7 @@ namespace SenseNet.ContentRepository.Storage.AppModel
 
         public IEnumerable<NodeHead> ResolveApplication(string appName, NodeHead contextNode)
         {
-            return ResolveApplications(appName, contextNode.Path, ActiveSchema.NodeTypes.GetItemById(contextNode.NodeTypeId));
+            return ResolveApplications(appName, contextNode.Path, Providers.Instance.StorageSchema.NodeTypes.GetItemById(contextNode.NodeTypeId));
         }
         public IEnumerable<NodeHead> ResolveApplications(string appName, Node contextNode)
         {
@@ -47,7 +47,7 @@ namespace SenseNet.ContentRepository.Storage.AppModel
         }
         public IEnumerable<NodeHead> ResolveApplications(string appName, string contextNodePath, string nodeTypeName)
         {
-            return ResolveApplications(appName, contextNodePath, ActiveSchema.NodeTypes[nodeTypeName]);
+            return ResolveApplications(appName, contextNodePath, Providers.Instance.StorageSchema.NodeTypes[nodeTypeName]);
         }
         public IEnumerable<NodeHead> ResolveApplications(string appName, string contextNodePath, NodeType nodeType)
         {
@@ -60,7 +60,7 @@ namespace SenseNet.ContentRepository.Storage.AppModel
 
         public IEnumerable<string> GetAvailablePaths(string appName, NodeHead contextNode)
         {
-            return GetAvailablePaths(appName, contextNode.Path, ActiveSchema.NodeTypes.GetItemById(contextNode.NodeTypeId));
+            return GetAvailablePaths(appName, contextNode.Path, Providers.Instance.StorageSchema.NodeTypes.GetItemById(contextNode.NodeTypeId));
         }
         public IEnumerable<string> GetAvailablePaths(string appName, Node contextNode)
         {
@@ -68,7 +68,7 @@ namespace SenseNet.ContentRepository.Storage.AppModel
         }
         public IEnumerable<string> GetAvailablePaths(string appName, string contextNodePath, string nodeTypeName)
         {
-            return GetAvailablePaths(appName, contextNodePath, ActiveSchema.NodeTypes[nodeTypeName]);
+            return GetAvailablePaths(appName, contextNodePath, Providers.Instance.StorageSchema.NodeTypes[nodeTypeName]);
         }
         public IEnumerable<string> GetAvailablePaths(string appName, string contextNodePath, NodeType nodeType)
         {
@@ -187,23 +187,23 @@ namespace SenseNet.ContentRepository.Storage.AppModel
     {
         public static event EventHandler<AppCacheInvalidateEventArgs> Invalidate;
 
-        protected override void OnNodeCopied(object sender, NodeOperationEventArgs e)
+        protected internal override void OnNodeCopied(object sender, NodeOperationEventArgs e)
         {
             OnInvalidate(sender, e.TargetNode.Path);
         }
-        protected override void OnNodeCreated(object sender, NodeEventArgs e)
+        protected internal override void OnNodeCreated(object sender, NodeEventArgs e)
         {
             OnInvalidate(sender, e.SourceNode.Path);
         }
-        protected override void OnNodeDeleted(object sender, NodeEventArgs e)
+        protected internal override void OnNodeDeleted(object sender, NodeEventArgs e)
         {
             OnInvalidate(sender, e.SourceNode.Path);
         }
-        protected override void OnNodeDeletedPhysically(object sender, NodeEventArgs e)
+        protected internal override void OnNodeDeletedPhysically(object sender, NodeEventArgs e)
         {
             OnInvalidate(sender, e.SourceNode.Path);
         }
-        protected override void OnNodeMoved(object sender, NodeOperationEventArgs e)
+        protected internal override void OnNodeMoved(object sender, NodeOperationEventArgs e)
         {
             OnInvalidate(sender, e.SourceNode.Path);
             OnInvalidate(sender, e.TargetNode.Path);

@@ -4,6 +4,7 @@
   <Description>$Ctd-CustomListItem,Description</Description>
   <Icon>FormItem</Icon>
   <AllowIncrementalNaming>true</AllowIncrementalNaming>
+  <Categories>HideByDefault</Categories>
   <Fields>
     <Field name="WorkflowsRunning" type="Boolean">
       <Configuration>
@@ -33,7 +34,7 @@
         <VisibleNew>Hide</VisibleNew>
       </Configuration>
     </Field>
-    <Field name="Description" type="LongText">
+    <Field name="Description" type="RichText">
       <Configuration>
         <VisibleBrowse>Hide</VisibleBrowse>
         <VisibleEdit>Hide</VisibleEdit>

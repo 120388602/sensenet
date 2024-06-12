@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Text;
+using System.Threading;
 using SenseNet.ContentRepository.Storage;
 using SenseNet.ContentRepository.Storage.Data;
 using SenseNet.ContentRepository.Schema;
@@ -38,11 +39,18 @@ namespace SenseNet.ContentRepository.Security.ADSync
 
         /// <inheritdoc />
         /// <remarks>Synchronizes the modifications via the current <see cref="DirectoryProvider"/>.</remarks>
+        [Obsolete("Use async version instead.", true)]
         public override void Save(SavingMode mode)
+        {
+            SaveAsync(mode, CancellationToken.None).GetAwaiter().GetResult();
+        }
+        /// <inheritdoc />
+        /// <remarks>Synchronizes the modifications via the current <see cref="DirectoryProvider"/>.</remarks>
+        public override async System.Threading.Tasks.Task SaveAsync(SavingMode mode, CancellationToken cancel)
         {
             var originalId = this.Id;
 
-            base.Save(mode);
+            await base.SaveAsync(mode, cancel).ConfigureAwait(false);
 
             // AD Sync
             if (_syncObject)
@@ -55,15 +63,22 @@ namespace SenseNet.ContentRepository.Security.ADSync
 
         /// <inheritdoc />
         /// <remarks>Synchronizes the deletion via the current <see cref="DirectoryProvider"/>.</remarks>
+        [Obsolete("Use async version instead", true)]
         public override void ForceDelete()
         {
-            base.ForceDelete();
+            ForceDeleteAsync(CancellationToken.None).ConfigureAwait(false).GetAwaiter().GetResult();
+        }
+        /// <inheritdoc />
+        /// <remarks>Synchronizes the deletion via the current <see cref="DirectoryProvider"/>.</remarks>
+        public override async System.Threading.Tasks.Task ForceDeleteAsync(CancellationToken cancel)
+        {
+            await base.ForceDeleteAsync(cancel);
 
             // AD Sync
-            var ADProvider = DirectoryProvider.Current;
-            if (ADProvider != null)
+            var adProvider = DirectoryProvider.Current;
+            if (adProvider != null)
             {
-                ADProvider.DeleteADObject(this);
+                adProvider.DeleteADObject(this);
             }
         }
 
@@ -152,7 +167,7 @@ namespace SenseNet.ContentRepository.Security.ADSync
             // update object without syncing to AD
             _syncObject = false;
 
-            this.Save();
+            this.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
         }
     }
 }

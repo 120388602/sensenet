@@ -3,7 +3,11 @@ using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.Serialization;
 using System.Runtime.Serialization.Formatters.Binary;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
+using SenseNet.Diagnostics;
 using SenseNet.Search.Querying;
 
 namespace SenseNet.Search.Indexing
@@ -33,8 +37,103 @@ namespace SenseNet.Search.Indexing
     /// Represents a collection of index fields.
     /// </summary>
     [Serializable]
-    public class IndexDocument : IEnumerable<IndexField>
+    public class IndexDocument : ICollection<IndexField>
     {
+        #region private class FieldDictionary : IDictionary<string, IndexField>
+        [Serializable]
+        private class FieldDictionary : IDictionary<string, IndexField>
+        {
+            private readonly Action _invalidate;
+
+            public FieldDictionary(Action invalidate)
+            {
+                _invalidate = invalidate;
+            }
+
+            private readonly Dictionary<string, IndexField> _underlyingStorage = new Dictionary<string, IndexField>();
+            private ICollection<KeyValuePair<string, IndexField>> UnderlyingCollection
+                => (ICollection<KeyValuePair<string, IndexField>>)_underlyingStorage;
+
+            public IEnumerator<KeyValuePair<string, IndexField>> GetEnumerator()
+            {
+                return _underlyingStorage.GetEnumerator();
+            }
+            IEnumerator IEnumerable.GetEnumerator()
+            {
+                return GetEnumerator();
+            }
+
+            public void Add(KeyValuePair<string, IndexField> item)
+            {
+                UnderlyingCollection.Add(item);
+                _invalidate();
+            }
+
+            public void Clear()
+            {
+                _underlyingStorage.Clear();
+                _invalidate();
+            }
+
+            public bool Contains(KeyValuePair<string, IndexField> item)
+            {
+                return _underlyingStorage.Contains(item);
+            }
+
+            void ICollection<KeyValuePair<string, IndexField>>.CopyTo(KeyValuePair<string, IndexField>[] array, int arrayIndex)
+            {
+                UnderlyingCollection.CopyTo(array, arrayIndex);
+            }
+
+            bool ICollection<KeyValuePair<string, IndexField>>.Remove(KeyValuePair<string, IndexField> item)
+            {
+                var result = UnderlyingCollection.Remove(item);
+                _invalidate();
+                return result;
+            }
+
+            public int Count => _underlyingStorage.Count;
+            bool ICollection<KeyValuePair<string, IndexField>>.IsReadOnly => UnderlyingCollection.IsReadOnly;
+
+            public void Add(string key, IndexField value)
+            {
+                _underlyingStorage.Add(key, value);
+                _invalidate();
+            }
+
+            public bool ContainsKey(string key)
+            {
+                return _underlyingStorage.ContainsKey(key);
+            }
+
+            public bool Remove(string key)
+            {
+                var result = _underlyingStorage.Remove(key);
+                _invalidate();
+                return result;
+            }
+
+            public bool TryGetValue(string key, out IndexField value)
+            {
+                return _underlyingStorage.TryGetValue(key, out value);
+            }
+
+            public IndexField this[string key]
+            {
+                get => _underlyingStorage[key];
+                set
+                {
+                    _underlyingStorage[key] = value;
+                    _invalidate();
+                }
+            }
+
+            public ICollection<string> Keys => _underlyingStorage.Keys;
+            public ICollection<IndexField> Values => _underlyingStorage.Values;
+        }
+        #endregion
+
+
         /// <summary>
         /// Represents an index document that will be not included in the index.
         /// </summary>
@@ -56,7 +155,15 @@ namespace SenseNet.Search.Indexing
         [NonSerialized]
         public static List<string> ForbiddenFields = new List<string>(new[] { "Password", "PasswordHash" });
 
-        private readonly Dictionary<string, IndexField> _fields = new Dictionary<string, IndexField>();
+        private readonly FieldDictionary _fields;
+
+        [JsonIgnore]
+        public IDictionary<string, IndexField> Fields => _fields;
+
+        public IndexDocument()
+        {
+            _fields = new FieldDictionary(Invalidate);
+        }
 
         /// <summary>
         /// Returns with VersionId. Shortcut of the following call: GetIntegerValue(IndexFieldName.VersionId);
@@ -133,6 +240,25 @@ namespace SenseNet.Search.Indexing
 
             if (field.Type == IndexValueType.Int)
                 return field.IntegerValue;
+
+            throw TypeError(fieldName, field.Type);
+        }
+        /// <summary>
+        /// Returns with the array of System.Int32 values of the existing named field.
+        /// If the field does not exist in the document, returns with null.
+        /// If the IndexValueType of the existing field is not Int or IntArray, an ApplicationException will be thrown.
+        /// If the IndexValueType of the existing field is Int, returns with an one element array.
+        /// </summary>
+        public int[] GetIntegerArrayValue(string fieldName)
+        {
+            if (!_fields.TryGetValue(fieldName, out var field))
+                return default(int[]);
+
+            if (field.Type == IndexValueType.Int)
+                return new[] { field.IntegerValue };
+
+            if (field.Type == IndexValueType.IntArray)
+                return field.IntegerArrayValue;
 
             throw TypeError(fieldName, field.Type);
         }
@@ -244,17 +370,152 @@ namespace SenseNet.Search.Indexing
 
         /* =========================================================================================== */
 
-        /// <summary>
-        /// Returns with the deserialized IndexDocument.
-        /// </summary>
-        /// <param name="serializedIndexDocument"></param>
-        /// <returns></returns>
-        public static IndexDocument Deserialize(byte[] serializedIndexDocument)
+        private static readonly JsonSerializerSettings FormattedSerializerSettings = new JsonSerializerSettings
         {
-            var docStream = new MemoryStream(serializedIndexDocument);
-            var formatter = new BinaryFormatter();
-            var indxDoc = (IndexDocument)formatter.Deserialize(docStream);
-            return indxDoc;
+            Converters = new List<JsonConverter> {new IndexFieldJsonConverter()},
+            NullValueHandling = NullValueHandling.Ignore,
+            DateTimeZoneHandling = DateTimeZoneHandling.Utc,
+            Formatting = Formatting.Indented
+        };
+        private static readonly JsonSerializerSettings OneLineSerializerSettings = new JsonSerializerSettings
+        {
+            Converters = new List<JsonConverter> { new IndexFieldJsonConverter() },
+            NullValueHandling = NullValueHandling.Ignore,
+            DateTimeZoneHandling = DateTimeZoneHandling.Utc,
+            Formatting = Formatting.None
+        };
+
+        public static IndexDocument Deserialize(string serializedIndexDocument)
+        {
+            try
+            {
+                var deserialized = JsonSerializer.Create(FormattedSerializerSettings).Deserialize(
+                    new JsonTextReader(new StringReader(serializedIndexDocument)));
+                var result = new IndexDocument();
+                foreach (JObject field in (JArray)deserialized)
+                {
+                    string name = null;
+                    var type = IndexValueType.String;
+                    var mode = IndexingMode.Default;
+                    var store = IndexStoringMode.Default;
+                    var termVector = IndexTermVector.Default;
+                    object value = null;
+
+                    foreach (var item in field)
+                    {
+                        switch (item.Key)
+                        {
+                            case "Name": name = ((JValue)item.Value).ToString(); break;
+                            case "Type": type = (IndexValueType)Enum.Parse(typeof(IndexValueType), ((JValue)item.Value).ToString(), true); break;
+                            case "Mode": mode = (IndexingMode)Enum.Parse(typeof(IndexingMode), ((JValue)item.Value).ToString(), true); break;
+                            case "Store": store = (IndexStoringMode)Enum.Parse(typeof(IndexStoringMode), ((JValue)item.Value).ToString(), true); break;
+                            case "TermVector": termVector = (IndexTermVector)Enum.Parse(typeof(IndexTermVector), ((JValue)item.Value).ToString(), true); break;
+                            case "Value":
+                                if (item.Value is JValue jvalue)
+                                    value = jvalue;
+                                else if (item.Value is JArray jarray)
+                                    value = jarray.Select(x => x.ToString()).ToArray();
+                                break;
+                            default:
+                                throw new NotSupportedException();
+                        }
+                    }
+
+                    IndexField indexField;
+                    switch (type)
+                    {
+                        case IndexValueType.String:
+                            indexField = new IndexField(name, value?.ToString(), mode, store, termVector);
+                            break;
+                        case IndexValueType.StringArray:
+                            indexField = new IndexField(name, (string[])value, mode, store, termVector);
+                            break;
+                        case IndexValueType.Bool:
+                            indexField = new IndexField(name, Convert.ToBoolean(value), mode, store, termVector);
+                            break;
+                        case IndexValueType.Int:
+                            indexField = new IndexField(name, Convert.ToInt32(value), mode, store, termVector);
+                            break;
+                        case IndexValueType.IntArray:
+                            var stringArray = (string[]) value ?? Array.Empty<string>();
+                            var intValues = stringArray.Select(x => Convert.ToInt32(x)).ToArray();
+                            indexField = new IndexField(name, intValues, mode, store, termVector);
+                            break;
+                        case IndexValueType.Long:
+                            indexField = new IndexField(name, Convert.ToInt64(value), mode, store, termVector);
+                            break;
+                        case IndexValueType.Float:
+                            indexField = new IndexField(name, Convert.ToSingle(value), mode, store, termVector);
+                            break;
+                        case IndexValueType.Double:
+                            indexField = new IndexField(name, Convert.ToDouble(value), mode, store, termVector);
+                            break;
+                        case IndexValueType.DateTime:
+                            indexField = new IndexField(name, DateTime.Parse(value.ToString()), mode, store, termVector);
+                            break;
+                        default:
+                            throw new ArgumentOutOfRangeException();
+                    }
+
+                    result.Add(indexField);
+                }
+                return result;
+            }
+            catch (Exception e)
+            {
+                throw new SerializationException("Cannot deserialize the index document: " + e.Message, e);
+            }
         }
+
+        [NonSerialized]
+        private string _serializedIndexDocument;
+        private void Invalidate()
+        {
+            _serializedIndexDocument = null;
+        }
+        public string Serialize(bool oneLine = false)
+        {
+            if (_serializedIndexDocument == null)
+            {
+                using (var op = SnTrace.Index.StartOperation($"Serialize IndexDocument. VersionId: {VersionId}"))
+                {
+                    using (var writer = new StringWriter())
+                    {
+                        var settings = oneLine ? OneLineSerializerSettings : FormattedSerializerSettings;
+                        JsonSerializer.Create(settings).Serialize(writer, this);
+                        _serializedIndexDocument = writer.GetStringBuilder().ToString();
+                    }
+                    op.Successful = true;
+                }
+            }
+            return _serializedIndexDocument;
+        }
+
+        // Additional ICollection<> implementations
+
+        public void Clear()
+        {
+            throw new NotSupportedException();
+        }
+
+        public bool Contains(IndexField item)
+        {
+            if (item == null)
+                return false;
+            return _fields.ContainsKey(item.Name);
+        }
+
+        public void CopyTo(IndexField[] array, int arrayIndex)
+        {
+            _fields.Values.CopyTo(array, arrayIndex);
+        }
+
+        public bool Remove(IndexField item)
+        {
+            throw new NotSupportedException();
+        }
+
+        public int Count => _fields.Count;
+        public bool IsReadOnly => false;
     }
 }

@@ -2,9 +2,11 @@
 <ContentType name="Sites" parentType="Folder" handler="SenseNet.ContentRepository.Folder" xmlns="http://schemas.sensenet.com/SenseNet/ContentRepository/ContentTypeDefinition">
   <DisplayName>$Ctd-Sites,DisplayName</DisplayName>
   <Description>$Ctd-Sites,Description</Description>
-  <Icon>Site</Icon>
+  <Icon>Sites</Icon>
   <AllowedChildTypes>
     Site
   </AllowedChildTypes>
+  <Categories>HideByDefault</Categories>
+  <SystemType>true</SystemType>
   <Fields></Fields>
 </ContentType>

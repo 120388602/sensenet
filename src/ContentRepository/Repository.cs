@@ -1,33 +1,24 @@
 ﻿using System;
+using System.IO;
+using System.Text;
+using System.Threading;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using SenseNet.ContentRepository.Storage;
 using SenseNet.ContentRepository.Storage.Security;
 using SenseNet.Configuration;
+using SenseNet.ContentRepository.Security.Clients;
+using SenseNet.ContentRepository.Storage.Data;
+using SenseNet.Diagnostics;
 using SenseNet.Tools;
+using SenseNet.Packaging;
+using SenseNet.Search;
 
 namespace SenseNet.ContentRepository
 {
     public static class Repository
     {
-        /// <summary>
-        /// Executes the default boot sequence of the Repository.
-        /// </summary>
-        /// <example>
-        /// Use the following code in your tool or other outer application:
-        /// <code>
-        /// using (Repository.Start())
-        /// {
-        ///     // your code
-        /// }
-        /// </code>
-        /// </example>
-        /// <remarks>
-        /// Repository will be stopped if the returned <see cref="RepositoryStartSettings"/> instance is disposed.
-        /// </remarks>
-        /// <returns>A new IDisposable <see cref="RepositoryInstance"/> instance.</returns>
-        public static RepositoryInstance Start()
-        {
-            return Start(RepositoryStartSettings.Default);
-        }
         /// <summary>
         /// Executes the boot sequence of the Repository by the passed <see cref="RepositoryStartSettings"/>.
         /// </summary>
@@ -52,13 +43,86 @@ namespace SenseNet.ContentRepository
         /// <returns></returns>
         public static RepositoryInstance Start(RepositoryStartSettings settings)
         {
+            if (!settings.ExecutingPatches)
+            {
+                // Switch ON this flag so that inner repository start operations
+                // do not try to execute patches again recursively.
+                settings.ExecutingPatches = true;
+
+                //TODO: [auto-patch] this feature is not released yet
+                //PackageManager.ExecuteAssemblyPatches(settings);
+            }
+
             var instance = RepositoryInstance.Start(settings);
             SystemAccount.Execute(() => Root);
             return instance;
         }
         public static RepositoryInstance Start(RepositoryBuilder builder)
         {
-            return builder == null ? Start() : Start((RepositoryStartSettings) builder);
+            var connectionStrings = builder.Services?.GetRequiredService<IOptions<ConnectionStringOptions>>();
+
+            Providers.Instance.InitializeBlobProviders(connectionStrings?.Value ?? new ConnectionStringOptions());
+
+            EnsureDatabase(builder);
+            
+            var initialData = builder.InitialData;
+            if (initialData != null)
+                Providers.Instance.DataStore.InstallInitialDataAsync(initialData, CancellationToken.None)
+                    .GetAwaiter().GetResult();
+
+            RepositoryInstance repositoryInstance = null;
+            var exclusiveLockOptions = builder.Services?.GetService<IOptions<ExclusiveLockOptions>>()?.Value;
+
+            ExclusiveBlock.RunAsync("SenseNet.PatchManager", Guid.NewGuid().ToString(),
+                ExclusiveBlockType.WaitAndAcquire, exclusiveLockOptions, CancellationToken.None, () =>
+            {
+                var logger = Providers.Instance.GetProvider<ILogger<SnILogger>>();
+                var patchManager = new PatchManager(builder, logRecord => { logRecord.WriteTo(logger); });
+                patchManager.ExecutePatchesOnBeforeStart();
+
+                repositoryInstance = Start((RepositoryStartSettings)builder);
+
+                var permissions = initialData?.Permissions;
+                if (permissions != null && permissions.Count > 0)
+                    new SecurityInstaller(Providers.Instance.SecurityHandler, Providers.Instance.StorageSchema,
+                        Providers.Instance.DataStore).InstallDefaultSecurityStructure(initialData);
+
+                var indexingEngine = Providers.Instance.SearchEngine.IndexingEngine;
+                if (indexingEngine.Running)
+                {
+                    if (initialData?.IndexDocuments != null)
+                    {
+                        // Build the index from an in-memory structure. This is a developer use case.
+                        indexingEngine.ClearIndexAsync(CancellationToken.None)
+                            .ConfigureAwait(false).GetAwaiter().GetResult();
+                        indexingEngine.WriteIndexAsync(null, null,
+                                initialData.IndexDocuments, CancellationToken.None)
+                            .ConfigureAwait(false).GetAwaiter().GetResult();
+                    }
+                    else
+                    {
+                        // make sure the index exists and contains documents
+                        EnsureIndex(builder);
+                    }
+                }
+
+                patchManager.ExecutePatchesOnAfterStart();
+                RepositoryVersionInfo.Reset();
+
+                return System.Threading.Tasks.Task.CompletedTask;
+            }).GetAwaiter().GetResult();
+
+            // generate default clients and secrets
+            var clientStore = builder.Services?.GetService<ClientStore>();
+            var clientOptions = builder.Services?.GetService<IOptions<ClientStoreOptions>>()?.Value;
+            var logger = builder.Services?.GetService<ILogger<RepositoryInstance>>();
+
+            logger?.LogInformation("Ensuring default clients and secrets...");
+
+            clientStore?.EnsureClientsAsync(clientOptions?.Authority, clientOptions?.RepositoryUrl?.RemoveUrlSchema())
+                .GetAwaiter().GetResult();
+
+            return repositoryInstance;
         }
         internal static RepositoryInstance Start(IRepositoryBuilder builder)
         {
@@ -82,10 +146,77 @@ namespace SenseNet.ContentRepository
             RepositoryInstance.Shutdown();
         }
 
-        [SenseNet.ApplicationModel.ODataFunction]
-        public static RepositoryVersionInfo GetVersionInfo(Content content)
+        private static void EnsureDatabase(RepositoryBuilder builder)
         {
-            return RepositoryVersionInfo.Instance;
+            if (builder.Services == null)
+                return;
+
+            var ds = builder.Services.GetService<IDataStore>();
+            var dbExists = ds.IsDatabaseReadyAsync(CancellationToken.None).GetAwaiter().GetResult();
+            if (dbExists) 
+                return;
+
+            var logger = builder.Services.GetService<ILogger<RepositoryInstance>>();
+            var packageDescriptor = builder.Services.GetService<IInstallPackageDescriptor>();
+            if (packageDescriptor == null)
+                return;
+
+            // this will install the database and the initial package
+            new Installer(builder, null, logger)
+                .InstallSenseNet(packageDescriptor.GetPackageAssembly(), packageDescriptor.GetPackageName());
+        }
+
+        private static void EnsureIndex(RepositoryBuilder builder)
+        {
+            var logger = builder.Services?.GetService<ILogger<RepositoryInstance>>();
+            logger?.LogInformation("Checking the index...");
+
+            // execute a query that should return multiple items if the index is not empty
+            var indexDocExist = SystemAccount.Execute(() => ContentQuery.QueryAsync(SafeQueries.ContentTypes,
+                QuerySettings.AdminSettings, CancellationToken.None).ConfigureAwait(false).GetAwaiter().GetResult().Count > 10);
+
+            if (indexDocExist)
+                return;
+
+            // This scenario auto-generates the whole index from the database. The most common case is
+            // when a new web app domain (usually a container) is started in a load balanced environment.
+
+            var populator = Providers.Instance.SearchManager.GetIndexPopulator();
+            var indexCount = 0;
+
+            populator.IndexingError += (sender, eventArgs) =>
+            {
+                logger?.LogWarning($"Error during building app start index for {eventArgs.Path}. " +
+                                         $"(id: {eventArgs.NodeId}). {eventArgs.Exception?.Message}");
+            };
+            populator.NodeIndexed += (sender, eventArgs) =>
+            {
+                Interlocked.Increment(ref indexCount);
+            };
+
+            logger?.LogInformation("Rebuilding the index...");
+
+            populator.ClearAndPopulateAllAsync(CancellationToken.None, builder.Console ?? new LoggerConsole(logger)).GetAwaiter().GetResult();
+
+            logger?.LogInformation($"Indexing of {indexCount} nodes finished.");
+        }
+
+        //TODO: move this helper logger class to a more appropriate place
+        private class LoggerConsole : TextWriter
+        {
+            private readonly ILogger _logger;
+
+            public LoggerConsole(ILogger logger)
+            {
+                _logger = logger;
+            }
+
+            public override void Write(string value)
+            {
+                _logger.LogInformation(value);
+            }
+
+            public override Encoding Encoding { get; } = Encoding.Unicode;
         }
 
         // ========================================================================= Constants
@@ -153,7 +284,7 @@ namespace SenseNet.ContentRepository
                 {
                     var parent = Node.LoadNode(RepositoryPath.GetParentPath(AspectsFolderPath));
                     folder = new Folder(parent) { Name = AspectsFolderName };
-                    folder.Save();
+                    folder.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                 }
                 return folder;
             }
@@ -168,10 +299,6 @@ namespace SenseNet.ContentRepository
         public static bool UserProfilesEnabled => IdentityManagement.UserProfilesEnabled;
         [Obsolete("After V6.5 PATCH 9: Use Logging.DownloadCounterEnabled instead.")]
         public static bool DownloadCounterEnabled => Logging.DownloadCounterEnabled;
-        [Obsolete("After V6.5 PATCH 9: Use SystemStart.WarmupEnabled instead.")]
-        public static bool WarmupEnabled => SystemStart.WarmupEnabled;
-        [Obsolete("After V6.5 PATCH 9: Use SystemStart.WarmupControlQueryFilter instead.")]
-        public static string WarmupControlQueryFilter => SystemStart.WarmupControlQueryFilter;
         [Obsolete("After V6.5 PATCH 9: Use Versioning.CheckInComments instead.")]
         public static CheckInCommentsMode CheckInCommentsMode => Configuration.Versioning.CheckInCommentsMode;
         [Obsolete("After V6.5 PATCH 9: Use Providers.RepositoryPathProviderEnabled instead.")]

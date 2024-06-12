@@ -2,12 +2,17 @@
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Threading;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using SenseNet.Configuration;
+using SenseNet.ContentRepository.InMemory;
 using SenseNet.ContentRepository.Storage;
-using SenseNet.ContentRepository.Storage.Data;
 using SenseNet.Diagnostics;
-using SenseNet.Tests;
+using SenseNet.Extensions.DependencyInjection;
+using SenseNet.Tests.Core;
+using SenseNet.Tests.Core.Implementations;
+using SenseNet.Tools.Diagnostics;
 
 namespace SenseNet.ContentRepository.Tests
 {
@@ -20,47 +25,37 @@ namespace SenseNet.ContentRepository.Tests
         }
     }
 
+    internal class NullEventPropertyCollector : IEventPropertyCollector
+    {
+        public IDictionary<string, object> Collect(IDictionary<string, object> properties)
+        {
+            return properties;
+        }
+    }
+
     [TestClass]
     public class LoggerTests : TestBase
     {
-        [TestMethod]
-        public void Provider_Logger_Default()
-        {
-            Test(() =>
-            {
-                Assert.IsTrue(SnLog.Instance is SnEventLogger);
-            });
-        }
-        [TestMethod]
-        public void Provider_Logger_Configured()
+        [TestMethod, TestCategory("Services")]
+        public void Provider_Logger_Configured_CSrv()
         {
             var loggerTypeName = typeof(TestLogger).FullName;
 
-            // backup configuration
-            var eventLoggerClassNameBackup = Providers.EventLoggerClassName;
-
-            // configure the logger provider and reinitialize the instance
-            Providers.EventLoggerClassName = loggerTypeName;
-            Providers.Instance = new Providers();
-
-            try
+            // test of the custom logger
+            Test(builder =>
             {
-                Test(() =>
-                {
-                    Assert.AreEqual(loggerTypeName, SnLog.Instance.GetType().FullName);
-                });
-            }
-            finally
+                // ACTION
+                builder.UseLogger(new TestLogger());
+            },
+            () =>
             {
-                // rollback to the original configuration
-                Providers.EventLoggerClassName = eventLoggerClassNameBackup;
-                Providers.Instance = new Providers();
-            }
+                Assert.AreEqual(loggerTypeName, SnLog.Instance.GetType().FullName);
+            });
 
             // test of the restoration: logger instance need to be the default
             Test(() =>
             {
-                Assert.IsTrue(SnLog.Instance is SnEventLogger);
+                Assert.AreNotEqual(loggerTypeName, SnLog.Instance.GetType().FullName);
             });
         }
         [TestMethod]
@@ -76,24 +71,24 @@ namespace SenseNet.ContentRepository.Tests
         [TestMethod]
         public void Logger_Audit_Default()
         {
-            Test(() =>
+            Test2(services => { services.AddDatabaseAuditEventWriter(); },() =>
             {
                 // operations for a "content created" audit event
                 var folder = new SystemFolder(Repository.Root) {Name = "Folder1"};
-                folder.Save();
+                folder.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                 var folderId = folder.Id;
 
                 // operations for a "content modified" audit event
                 folder = Node.Load<SystemFolder>(folderId);
                 folder.Index++;
-                folder.Save();
+                folder.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                 // operations for a "content deleted" audit event
                 folder = Node.Load<SystemFolder>(folderId);
-                folder.ForceDelete();
+                folder.ForceDeleteAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                 // load audit log entries
-                var entries = DataProvider.Current.LoadLastAuditLogEntries(10);
+                var entries = Providers.Instance.GetProvider<ITestingDataProvider>().LoadLastAuditLogEntries(10);
                 var relatedEntries = entries.Where(e => e.ContentId == folderId).ToArray();
 
                 // assertions

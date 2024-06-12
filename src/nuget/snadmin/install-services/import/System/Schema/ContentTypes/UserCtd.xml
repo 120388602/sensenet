@@ -11,11 +11,12 @@
       <DisplayName>$Ctd-User,Name-DisplayName</DisplayName>
       <Description>$Ctd-User,Name-Description</Description>
       <Configuration>
+        <FieldIndex>230</FieldIndex>
         <VisibleBrowse>Show</VisibleBrowse>
-        <VisibleEdit>Show</VisibleEdit>
-        <VisibleNew>Show</VisibleNew>
+        <VisibleEdit>Hide</VisibleEdit>
+        <VisibleNew>Hide</VisibleNew>
         <Compulsory>true</Compulsory>
-        <MaxLength>20</MaxLength>
+        <MaxLength>100</MaxLength>
         <ControlHint>sn:ShortText</ControlHint>
       </Configuration>
     </Field>
@@ -23,8 +24,9 @@
       <DisplayName>$Ctd-User,LoginName-DisplayName</DisplayName>
       <Description>$Ctd-User,LoginName-Description</Description>
       <Configuration>
+        <FieldIndex>220</FieldIndex>
         <VisibleBrowse>Show</VisibleBrowse>
-        <VisibleEdit>Show</VisibleEdit>
+        <VisibleEdit>Hide</VisibleEdit>
         <VisibleNew>Show</VisibleNew>
         <Compulsory>true</Compulsory>
         <MaxLength>100</MaxLength>
@@ -40,30 +42,50 @@
     <Field name="JobTitle" type="ShortText">
       <DisplayName>$Ctd-User,JobTitle-DisplayName</DisplayName>
       <Description>$Ctd-User,JobTitle-Description</Description>
+      <Configuration>
+        <FieldIndex>210</FieldIndex>
+        <VisibleBrowse>Show</VisibleBrowse>
+        <VisibleEdit>Show</VisibleEdit>
+        <VisibleNew>Show</VisibleNew>
+      </Configuration>
     </Field>
     <Field name="Enabled" type="Boolean">
       <DisplayName>$Ctd-User,Enabled-DisplayName</DisplayName>
       <Description>$Ctd-User,Enabled-Description</Description>
+      <Configuration>
+        <FieldIndex>240</FieldIndex>
+        <VisibleBrowse>Hide</VisibleBrowse>
+        <VisibleEdit>Show</VisibleEdit>
+        <VisibleNew>Show</VisibleNew>
+      </Configuration>
     </Field>
     <Field name="Domain" type="ShortText">
       <DisplayName>$Ctd-User,Domain-DisplayName</DisplayName>
       <Description>$Ctd-User,Domain-Description</Description>
       <Configuration>
         <ReadOnly>true</ReadOnly>
+        <VisibleBrowse>Hide</VisibleBrowse>
+        <VisibleEdit>Hide</VisibleEdit>
+        <VisibleNew>Hide</VisibleNew>
       </Configuration>
     </Field>
     <Field name="Email" type="ShortText">
       <DisplayName>$Ctd-User,Email-DisplayName</DisplayName>
       <Description>$Ctd-User,Email-Description</Description>
       <Configuration>
+        <FieldIndex>160</FieldIndex>
         <Compulsory>true</Compulsory>
         <Regex>^[a-zA-Z0-9._%+-]+@(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$</Regex>
+        <VisibleBrowse>Show</VisibleBrowse>
+        <VisibleEdit>Hide</VisibleEdit>
+        <VisibleNew>Show</VisibleNew>
       </Configuration>
     </Field>
     <Field name="FullName" type="ShortText">
       <DisplayName>$Ctd-User,FullName-DisplayName</DisplayName>
       <Description>$Ctd-User,FullName-Description</Description>
       <Configuration>
+        <FieldIndex>200</FieldIndex>
         <Compulsory>true</Compulsory>
         <Regex>[^&lt;]+</Regex>
       </Configuration>
@@ -91,6 +113,7 @@
       <Bind property="ImageRef" />
       <Bind property="ImageData" />
       <Configuration>
+        <FieldIndex>250</FieldIndex>
         <Visible>true</Visible>
         <ControlHint>sn:Image</ControlHint>
       </Configuration>
@@ -100,6 +123,10 @@
       <Description>$Ctd-User,Password-Description</Description>
       <Bind property="PasswordHash"></Bind>
       <Configuration>
+        <FieldIndex>120</FieldIndex>
+        <VisibleBrowse>Hide</VisibleBrowse>
+        <VisibleEdit>Hide</VisibleEdit>
+        <VisibleNew>Show</VisibleNew>
         <Compulsory>true</Compulsory>
         <ReenterTitle>$Ctd-User,Password-ReenterTitle</ReenterTitle>
         <ReenterDescription>$Ctd-User,Password-ReenterDescription</ReenterDescription>
@@ -109,8 +136,8 @@
       <DisplayName>$Ctd-User,SyncGuid-DisplayName</DisplayName>
       <Description>$Ctd-User,SyncGuid-Description</Description>
       <Configuration>
-        <VisibleBrowse>Advanced</VisibleBrowse>
-        <VisibleEdit>Advanced</VisibleEdit>
+        <VisibleBrowse>Hide</VisibleBrowse>
+        <VisibleEdit>Hide</VisibleEdit>
         <VisibleNew>Hide</VisibleNew>
       </Configuration>
     </Field>
@@ -119,8 +146,8 @@
       <Description>$Ctd-User,LastSync-Description</Description>
       <Configuration>
         <DateTimeMode>DateAndTime</DateTimeMode>
-        <VisibleBrowse>Advanced</VisibleBrowse>
-        <VisibleEdit>Advanced</VisibleEdit>
+        <VisibleBrowse>Hide</VisibleBrowse>
+        <VisibleEdit>Hide</VisibleEdit>
         <VisibleNew>Hide</VisibleNew>
       </Configuration>
     </Field>
@@ -137,6 +164,10 @@
       <DisplayName>$Ctd-User,Manager-DisplayName</DisplayName>
       <Description>$Ctd-User,Manager-Description</Description>
       <Configuration>
+        <FieldIndex>170</FieldIndex>
+        <VisibleBrowse>Hide</VisibleBrowse>
+        <VisibleEdit>Show</VisibleEdit>
+        <VisibleNew>Show</VisibleNew>
         <AllowMultiple>false</AllowMultiple>
         <AllowedTypes>
           <Type>User</Type>
@@ -146,7 +177,7 @@
         </SelectionRoot>
       </Configuration>
     </Field>
-    <Field name="Description" type="LongText">
+    <Field name="Description" type="RichText">
       <Configuration>
         <VisibleBrowse>Hide</VisibleBrowse>
         <VisibleEdit>Hide</VisibleEdit>
@@ -160,7 +191,10 @@
         <Analyzer>Standard</Analyzer>
       </Indexing>
       <Configuration>
-        <Visible>true</Visible>
+        <FieldIndex>190</FieldIndex>
+        <VisibleBrowse>Show</VisibleBrowse>
+        <VisibleEdit>Show</VisibleEdit>
+        <VisibleNew>Show</VisibleNew>
       </Configuration>
     </Field>
     <Field name="Languages" type="ShortText">
@@ -170,13 +204,16 @@
         <Analyzer>Standard</Analyzer>
       </Indexing>
       <Configuration>
-        <Visible>true</Visible>
+        <VisibleBrowse>Show</VisibleBrowse>
+        <VisibleEdit>Show</VisibleEdit>
+        <VisibleNew>Show</VisibleNew>
       </Configuration>
     </Field>
     <Field name="Phone" type="ShortText">
       <DisplayName>$Ctd-User,Phone-DisplayName</DisplayName>
       <Description>$Ctd-User,Phone-Description</Description>
       <Configuration>
+        <FieldIndex>140</FieldIndex>
         <Regex>(^\d*([-\s\+\(\)]\d*)*$)?</Regex>
         <Visible>true</Visible>
       </Configuration>
@@ -219,9 +256,9 @@
           <Option value="Female">$Ctd-User,Gender-Female</Option>
           <Option value="Male">$Ctd-User,Gender-Male</Option>
         </Options>
-        <VisibleBrowse>Advanced</VisibleBrowse>
-        <VisibleEdit>Advanced</VisibleEdit>
-        <VisibleNew>Advanced</VisibleNew>
+        <VisibleBrowse>Show</VisibleBrowse>
+        <VisibleEdit>Show</VisibleEdit>
+        <VisibleNew>Show</VisibleNew>
       </Configuration>
     </Field>
     <Field name="MaritalStatus" type="Choice">
@@ -235,18 +272,20 @@
           <Option value="Single">$Ctd-User,MaritalStatus-Single</Option>
           <Option value="Married">$Ctd-User,MaritalStatus-Married</Option>
         </Options>
-        <VisibleBrowse>Advanced</VisibleBrowse>
-        <VisibleEdit>Advanced</VisibleEdit>
-        <VisibleNew>Advanced</VisibleNew>
+        <VisibleBrowse>Show</VisibleBrowse>
+        <VisibleEdit>Show</VisibleEdit>
+        <VisibleNew>Show</VisibleNew>
       </Configuration>
     </Field>
     <Field name="BirthDate" type="DateTime">
       <DisplayName>$Ctd-User,BirthDate-DisplayName</DisplayName>
       <Configuration>
+        <FieldIndex>180</FieldIndex>
         <DateTimeMode>Date</DateTimeMode>
-        <VisibleBrowse>Advanced</VisibleBrowse>
-        <VisibleEdit>Advanced</VisibleEdit>
-        <VisibleNew>Advanced</VisibleNew>
+        <MaxValue>@@Today@@</MaxValue>
+        <VisibleBrowse>Show</VisibleBrowse>
+        <VisibleEdit>Show</VisibleEdit>
+        <VisibleNew>Show</VisibleNew>
       </Configuration>
     </Field>
     <Field name="Education" type="LongText">
@@ -255,41 +294,48 @@
       <Configuration>
         <TextType>LongText</TextType>
         <ControlHint>sn:EducationEditor</ControlHint>
-        <VisibleBrowse>Advanced</VisibleBrowse>
-        <VisibleEdit>Advanced</VisibleEdit>
-        <VisibleNew>Advanced</VisibleNew>
+        <VisibleBrowse>Hide</VisibleBrowse>
+        <VisibleEdit>Hide</VisibleEdit>
+        <VisibleNew>Hide</VisibleNew>
       </Configuration>
     </Field>
     <Field name="TwitterAccount" type="ShortText">
       <DisplayName>$Ctd-User,TwitterAccount-DisplayName</DisplayName>
       <Configuration>
-        <VisibleBrowse>Advanced</VisibleBrowse>
-        <VisibleEdit>Advanced</VisibleEdit>
-        <VisibleNew>Advanced</VisibleNew>
+        <FieldIndex>110</FieldIndex>
+        <VisibleBrowse>Show</VisibleBrowse>
+        <VisibleEdit>Show</VisibleEdit>
+        <VisibleNew>Show</VisibleNew>
       </Configuration>
     </Field>
     <Field name="FacebookURL" type="ShortText">
       <DisplayName>$Ctd-User,FacebookURL-DisplayName</DisplayName>
       <Description>$Ctd-User,FacebookURL-Description</Description>
       <Configuration>
-        <VisibleBrowse>Advanced</VisibleBrowse>
-        <VisibleEdit>Advanced</VisibleEdit>
-        <VisibleNew>Advanced</VisibleNew>
+        <FieldIndex>150</FieldIndex>
+        <VisibleBrowse>Show</VisibleBrowse>
+        <VisibleEdit>Show</VisibleEdit>
+        <VisibleNew>Show</VisibleNew>
       </Configuration>
     </Field>
     <Field name="LinkedInURL" type="ShortText">
       <DisplayName>$Ctd-User,LinkedInURL-DisplayName</DisplayName>
       <Description>$Ctd-User,LinkedInURL-Description</Description>
       <Configuration>
-        <VisibleBrowse>Advanced</VisibleBrowse>
-        <VisibleEdit>Advanced</VisibleEdit>
-        <VisibleNew>Advanced</VisibleNew>
+        <FieldIndex>130</FieldIndex>
+        <VisibleBrowse>Show</VisibleBrowse>
+        <VisibleEdit>Show</VisibleEdit>
+        <VisibleNew>Show</VisibleNew>
       </Configuration>
     </Field>
     <Field name="Language" type="Choice">
       <DisplayName>$Ctd-User,Language-DisplayName</DisplayName>
       <Description>$Ctd-User,Language-Description</Description>
       <Configuration>
+        <VisibleBrowse>Hide</VisibleBrowse>
+        <VisibleEdit>Show</VisibleEdit>
+        <VisibleNew>Show</VisibleNew>
+        <FieldIndex>100</FieldIndex>
         <AllowMultiple>false</AllowMultiple>
         <AllowExtraValue>false</AllowExtraValue>
         <Options>
@@ -302,9 +348,9 @@
       <DisplayName>$Ctd-User,FollowedWorkspaces-DisplayName</DisplayName>
       <Description>$Ctd-User,FollowedWorkspaces-Description</Description>
       <Configuration>
-        <VisibleBrowse>Advanced</VisibleBrowse>
-        <VisibleEdit>Advanced</VisibleEdit>
-        <VisibleNew>Advanced</VisibleNew>
+        <VisibleBrowse>Hide</VisibleBrowse>
+        <VisibleEdit>Hide</VisibleEdit>
+        <VisibleNew>Hide</VisibleNew>
         <AllowMultiple>true</AllowMultiple>
         <AllowedTypes>
           <Type>Workspace</Type>
@@ -326,6 +372,57 @@
       <Description>$Ctd-User,LastLoggedOut-Description</Description>
       <Configuration>
         <DateTimeMode>DateAndTime</DateTimeMode>
+        <VisibleBrowse>Hide</VisibleBrowse>
+        <VisibleEdit>Hide</VisibleEdit>
+        <VisibleNew>Hide</VisibleNew>
+      </Configuration>
+    </Field>
+    <Field name="ExternalUserProviders" type="LongText">
+      <Indexing>
+        <IndexHandler>SenseNet.Search.Indexing.GeneralJsonIndexHandler</IndexHandler>
+      </Indexing>
+    </Field>
+    <Field name="AllRoles" type="AllRoles">
+      <DisplayName>$Ctd-User,AllRoles-DisplayName</DisplayName>
+      <Description>$Ctd-User,AllRoles-Description</Description>
+      <Indexing>
+        <Mode>No</Mode>
+        <Store>No</Store>
+      </Indexing>
+       <Configuration>
+        <VisibleBrowse>Hide</VisibleBrowse>
+        <VisibleEdit>Hide</VisibleEdit>
+        <VisibleNew>Hide</VisibleNew>
+      </Configuration>
+    </Field>
+    <Field name="DirectRoles" type="DirectRoles">
+      <DisplayName>$Ctd-User,DirectRoles-DisplayName</DisplayName>
+      <Description>$Ctd-User,DirectRoles-Description</Description>
+      <Indexing>
+        <Mode>No</Mode>
+        <Store>No</Store>
+      </Indexing> 
+      <Configuration>
+        <VisibleBrowse>Hide</VisibleBrowse>
+        <VisibleEdit>Hide</VisibleEdit>
+        <VisibleNew>Hide</VisibleNew>
+      </Configuration>
+    </Field>
+	<Field name="MultiFactorEnabled" type="Boolean">
+      <DisplayName>$Ctd-User,MultiFactorEnabled-DisplayName</DisplayName>
+      <Description>$Ctd-User,MultiFactorEnabled-Description</Description>
+      <Configuration>
+        <FieldIndex>130</FieldIndex>
+        <VisibleBrowse>Show</VisibleBrowse>
+        <VisibleEdit>Show</VisibleEdit>
+        <VisibleNew>Show</VisibleNew>
+      </Configuration>
+    </Field>
+	<Field name="MultiFactorRegistered" type="Boolean">
+      <DisplayName>$Ctd-User,MultiFactorRegistered-DisplayName</DisplayName>
+      <Description>$Ctd-User,MultiFactorRegistered-Description</Description>
+      <Configuration>
+        <FieldIndex>135</FieldIndex>
         <VisibleBrowse>Hide</VisibleBrowse>
         <VisibleEdit>Hide</VisibleEdit>
         <VisibleNew>Hide</VisibleNew>

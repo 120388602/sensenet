@@ -1,10 +1,9 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
+using System.Threading;
 using SenseNet.ContentRepository.Storage;
 using SenseNet.ContentRepository.Schema;
-using SenseNet.ContentRepository.Storage.Schema;
 using SenseNet.ContentRepository.Storage.Security;
 using SenseNet.Search;
 
@@ -39,7 +38,7 @@ namespace SenseNet.ContentRepository.Workspaces
         public const string LocalGroupsFolderName = "Groups";
 
         /// <summary>
-        /// Returs a parent <see cref="Workspace"/> of the given <see cref="Node"/> if it is found.
+        /// Returns a parent <see cref="Workspace"/> of the given <see cref="Node"/> if it is found.
         /// </summary>
         /// <param name="child">The <see cref="Node"/> instance to find the owner workspace for.</param>
         /// <returns>The existing <see cref="Workspace"/> instance or null if it was not found.</returns>
@@ -72,7 +71,9 @@ namespace SenseNet.ContentRepository.Workspaces
             var groupFolderPath = RepositoryPath.Combine(this.Path, LocalGroupsFolderName);
 
             var settings = new SenseNet.Search.QuerySettings { EnableAutofilters = FilterStatus.Disabled };
-            var workspaceGroups = SenseNet.Search.ContentQuery.Query(SafeQueries.InTreeAndTypeIs, settings, groupFolderPath, typeof(Group).Name).Nodes;
+            var workspaceGroups = SenseNet.Search.ContentQuery.QueryAsync(SafeQueries.InTreeAndTypeIs, settings,
+                    CancellationToken.None, groupFolderPath, typeof(Group).Name)
+                .ConfigureAwait(false).GetAwaiter().GetResult().Nodes;
 
             foreach (var group in workspaceGroups.OfType<IGroup>())
             {
@@ -132,22 +133,30 @@ namespace SenseNet.ContentRepository.Workspaces
 
         // ===================================================================================== Overrides
 
-        /// <inheritdoc />
+        [Obsolete("Use async version instead.", true)]
         public override void Save(NodeSaveSettings settings)
         {
-            if(this.IsNew)
-                SecurityHandler.Assert(this.ParentId, PermissionType.ManageListsAndWorkspaces);
-            else
+            SaveAsync(settings, CancellationToken.None).GetAwaiter().GetResult();
+        }
+        public override async System.Threading.Tasks.Task SaveAsync(NodeSaveSettings settings, CancellationToken cancel)
+        {
+            if(!this.IsNew)
                 this.Security.Assert(PermissionType.ManageListsAndWorkspaces);
 
-            base.Save(settings);
+            await base.SaveAsync(settings, cancel).ConfigureAwait(false);
         }
 
         /// <inheritdoc />
+        [Obsolete("Use async version instead", true)]
         public override void ForceDelete()
         {
+            ForceDeleteAsync(CancellationToken.None).ConfigureAwait(false).GetAwaiter().GetResult();
+        }
+
+        public override async System.Threading.Tasks.Task ForceDeleteAsync(CancellationToken cancel)
+        {
             Security.Assert(PermissionType.ManageListsAndWorkspaces);
-            base.ForceDelete();
+            await base.ForceDeleteAsync(cancel);
         }
 
         /// <inheritdoc />

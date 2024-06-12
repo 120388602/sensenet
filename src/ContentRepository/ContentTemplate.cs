@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using SenseNet.Configuration;
 using SenseNet.ContentRepository.Storage;
 using SenseNet.ContentRepository.Storage.Search;
@@ -58,12 +59,13 @@ namespace SenseNet.ContentRepository
         public static IEnumerable<T> GetTemplatesForType<T>(string contentTypeName, string contextPath) where T : Node
         {
             var path = RepositoryPath.Combine(contextPath, contentTypeName);
-            if (SearchManager.ContentQueryIsAllowed)
+            if (Providers.Instance.SearchManager.ContentQueryIsAllowed)
             {
                 return
-                    ContentQuery.Query(SafeQueries.InFolder,
+                    ContentQuery.QueryAsync(SafeQueries.InFolder,
                         new QuerySettings { EnableAutofilters = FilterStatus.Disabled, EnableLifespanFilter = FilterStatus.Disabled },
-                        path).Nodes.Where(ct => ct is T).Cast<T>();
+                        CancellationToken.None,
+                        path).ConfigureAwait(false).GetAwaiter().GetResult().Nodes.Where(ct => ct is T).Cast<T>();
             }
             else
             {
@@ -227,11 +229,12 @@ namespace SenseNet.ContentRepository
         {
             var templatePath = RepositoryPath.Combine(path, contentTypeName);
 
-            if (SearchManager.ContentQueryIsAllowed)
+            if (Providers.Instance.SearchManager.ContentQueryIsAllowed)
             {
-                return ContentQuery.Query(SafeQueries.InFolderCountOnly,
+                return ContentQuery.QueryAsync(SafeQueries.InFolderCountOnly,
                     new QuerySettings { EnableAutofilters = FilterStatus.Disabled, EnableLifespanFilter = FilterStatus.Disabled },
-                    templatePath).Count > 0;
+                    CancellationToken.None,
+                    templatePath).ConfigureAwait(false).GetAwaiter().GetResult().Count > 0;
             }
             else
             {
@@ -352,20 +355,20 @@ namespace SenseNet.ContentRepository
                 contentList.ContentListDefinition = contentList.ContentListDefinition;
             }
 
-            target.Save();
+            target.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
 
             // inherit explicit permissions from template
             using (new SystemAccount())
             {
-                var entries = SecurityHandler.GetExplicitEntriesAsSystemUser(sourceNode.Id, null, EntryType.Normal);
+                var entries = Providers.Instance.SecurityHandler.GetExplicitEntriesAsSystemUser(sourceNode.Id, null, EntryType.Normal);
                 if (entries.Count > 0)
                 {
-                    var aclEdit = SecurityHandler.CreateAclEditor();
+                    var aclEdit = Providers.Instance.SecurityHandler.CreateAclEditor();
 
                     foreach (var ace in entries)
                         aclEdit.SetEntry(target.Id, ace, true);
 
-                    aclEdit.Apply();
+                    aclEdit.ApplyAsync(CancellationToken.None).GetAwaiter().GetResult();
                 }
             }
 
@@ -387,11 +390,12 @@ namespace SenseNet.ContentRepository
             {
                 IEnumerable<Node> sourceNodes;
 
-                if (SearchManager.ContentQueryIsAllowed)
+                if (Providers.Instance.SearchManager.ContentQueryIsAllowed)
                 {
-                    sourceNodes = ContentQuery.Query(SafeQueries.InTreeOrderByPath,
+                    sourceNodes = ContentQuery.QueryAsync(SafeQueries.InTreeOrderByPath,
                         new QuerySettings { EnableAutofilters = FilterStatus.Disabled, EnableLifespanFilter = FilterStatus.Disabled },
-                        templateRoot.Path).Nodes;
+                        CancellationToken.None,
+                        templateRoot.Path).ConfigureAwait(false).GetAwaiter().GetResult().Nodes;
                 }
                 else
                 {
@@ -405,8 +409,8 @@ namespace SenseNet.ContentRepository
                     sourceNodes = sourceNodeList;
                 }
 
-                var ctx = SecurityHandler.SecurityContext;
-                var aclEditor = SecurityHandler.CreateAclEditor(ctx);
+                var ctx = Providers.Instance.SecurityHandler.SecurityContext;
+                var aclEditor = Providers.Instance.SecurityHandler.CreateAclEditor(ctx);
                 foreach (var sourceNode in sourceNodes)
                 {
                     var expEntries = ctx.GetExplicitEntries(sourceNode.Id);
@@ -419,7 +423,7 @@ namespace SenseNet.ContentRepository
                     var targetNode = Node.LoadNode(targetNodePath);
                     if (!sourceNode.IsInherited)
                     {
-                        targetNode.Security.BreakInheritance();
+                        targetNode.Security.BreakInheritanceAsync(CancellationToken.None).GetAwaiter().GetResult();
                         targetNode.Security.RemoveExplicitEntries();
                     }
 
@@ -451,7 +455,7 @@ namespace SenseNet.ContentRepository
                         }
                     }
                 }
-                aclEditor.Apply();
+                aclEditor.ApplyAsync(CancellationToken.None).GetAwaiter().GetResult();
             }
         }
 
@@ -466,7 +470,7 @@ namespace SenseNet.ContentRepository
             {
                 IEnumerable<Content> targetContentList;
 
-                if (SearchManager.ContentQueryIsAllowed)
+                if (Providers.Instance.SearchManager.ContentQueryIsAllowed)
                 {
                     targetContentList = Content.All.DisableAutofilters().DisableLifespan().Where(c => c.InTree(targetRoot)).OrderBy(c => c.Path).ToList();
                 }
@@ -533,7 +537,7 @@ namespace SenseNet.ContentRepository
                     content.ContentHandler.DisableObserver(TypeResolver.GetType(NodeObserverNames.WORKFLOWNOTIFICATION, false));
                     content.ContentHandler.DisableObserver(TypeResolver.GetType(NodeObserverNames.NOTIFICATION, false));
 
-                    content.SaveSameVersion();
+                    content.SaveSameVersionAsync(CancellationToken.None).GetAwaiter().GetResult();
                 }
             }
         }

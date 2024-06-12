@@ -156,10 +156,32 @@
         <ReadOnly>true</ReadOnly>
       </Configuration>
     </Field>
+	  <Field name="Categories" type="ShortText">
+		<DisplayName>$Ctd-ContentType,Categories-DisplayName</DisplayName>
+		<Description>$Ctd-ContentType,Categories-Description</Description>
+		<Bind property="CategoryNames" />
+		<Configuration>
+		  <VisibleBrowse>Hide</VisibleBrowse>
+		  <VisibleEdit>Hide</VisibleEdit>
+		  <VisibleNew>Hide</VisibleNew>
+		  <ReadOnly>true</ReadOnly>
+		</Configuration>
+	  </Field>
+	  <Field name="IsSystemType" type="Boolean">
+      <DisplayName>$Ctd-ContentType,IsSystemType-DisplayName</DisplayName>
+      <Description>$Ctd-ContentType,IsSystemType-Description</Description>
+      <Bind property="IsSystemType"/>
+      <Configuration>
+        <VisibleBrowse>Hide</VisibleBrowse>
+        <VisibleEdit>Hide</VisibleEdit>
+        <VisibleNew>Hide</VisibleNew>
+        <ReadOnly>true</ReadOnly>
+      </Configuration>
+    </Field>
     <Field name="IsSystemContent" type="Boolean">
       <DisplayName>$Ctd-ContentType,IsSystemContent-DisplayName</DisplayName>
       <Description>$Ctd-ContentType,IsSystemContent-Description</Description>
-      <Bind property="IsSystem"></Bind>
+      <Bind property="IsSystem"/>
       <Configuration>
         <VisibleBrowse>Hide</VisibleBrowse>
         <VisibleEdit>Hide</VisibleEdit>
@@ -180,7 +202,7 @@
 			<DisplayName>$Ctd-ContentType,DisplayName-DisplayName</DisplayName>
 			<Description>$Ctd-ContentType,DisplayName-Description</Description>
 		</Field>
-		<Field name="Description" type="LongText">
+		<Field name="Description" type="RichText">
 			<DisplayName>$Ctd-ContentType,Description-DisplayName</DisplayName>
 			<Description>$Ctd-ContentType,Description-Description</Description>
       <Indexing>
@@ -215,9 +237,9 @@
         <ReadOnly>false</ReadOnly>
         <Compulsory>false</Compulsory>
         <DefaultValue></DefaultValue>
-        <VisibleBrowse>Show|Hide|Advanced</VisibleBrowse>
-        <VisibleEdit>Show|Hide|Advanced</VisibleEdit>
-        <VisibleNew>Show|Hide|Advanced</VisibleNew>
+        <VisibleBrowse>Show|Hide</VisibleBrowse>
+        <VisibleEdit>Show|Hide</VisibleEdit>
+        <VisibleNew>Show|Hide</VisibleNew>
       </Configuration>
     </Field>
     <Field name="LongTextField" type="LongText">
@@ -226,13 +248,13 @@
       <Configuration>
         <MaxLength>100</MaxLength>
         <MinLength>0</MinLength>
-        <TextType>LongText|RichText|AdvancedRichText</TextType>
+        <TextType>LongText|RichText</TextType>
         <ReadOnly>false</ReadOnly>
         <Compulsory>false</Compulsory>
         <DefaultValue></DefaultValue>
-        <VisibleBrowse>Show|Hide|Advanced</VisibleBrowse>
-        <VisibleEdit>Show|Hide|Advanced</VisibleEdit>
-        <VisibleNew>Show|Hide|Advanced</VisibleNew>
+        <VisibleBrowse>Show|Hide</VisibleBrowse>
+        <VisibleEdit>Show|Hide</VisibleEdit>
+        <VisibleNew>Show|Hide</VisibleNew>
       </Configuration>
     </Field>
     <Field name="NumberField" type="Number">
@@ -245,9 +267,9 @@
         <ReadOnly>false</ReadOnly>
         <Compulsory>false</Compulsory>
         <DefaultValue></DefaultValue>
-        <VisibleBrowse>Show|Hide|Advanced</VisibleBrowse>
-        <VisibleEdit>Show|Hide|Advanced</VisibleEdit>
-        <VisibleNew>Show|Hide|Advanced</VisibleNew>
+        <VisibleBrowse>Show|Hide</VisibleBrowse>
+        <VisibleEdit>Show|Hide</VisibleEdit>
+        <VisibleNew>Show|Hide</VisibleNew>
       </Configuration>
     </Field>
     <Field name="IntegerField" type="Integer">
@@ -259,9 +281,9 @@
         <ReadOnly>false</ReadOnly>
         <Compulsory>false</Compulsory>
         <DefaultValue></DefaultValue>
-        <VisibleBrowse>Show|Hide|Advanced</VisibleBrowse>
-        <VisibleEdit>Show|Hide|Advanced</VisibleEdit>
-        <VisibleNew>Show|Hide|Advanced</VisibleNew>
+        <VisibleBrowse>Show|Hide</VisibleBrowse>
+        <VisibleEdit>Show|Hide</VisibleEdit>
+        <VisibleNew>Show|Hide</VisibleNew>
       </Configuration>
     </Field>
     <Field name="BooleanField" type="Boolean">
@@ -271,9 +293,9 @@
         <ReadOnly>false</ReadOnly>
         <Compulsory>false</Compulsory>
         <DefaultValue></DefaultValue>
-        <VisibleBrowse>Show|Hide|Advanced</VisibleBrowse>
-        <VisibleEdit>Show|Hide|Advanced</VisibleEdit>
-        <VisibleNew>Show|Hide|Advanced</VisibleNew>
+        <VisibleBrowse>Show|Hide</VisibleBrowse>
+        <VisibleEdit>Show|Hide</VisibleEdit>
+        <VisibleNew>Show|Hide</VisibleNew>
       </Configuration>
     </Field>
     <Field name="ChoiceField" type="Choice">
@@ -289,9 +311,9 @@
         <ReadOnly>false</ReadOnly>
         <Compulsory>false</Compulsory>
         <DefaultValue></DefaultValue>
-        <VisibleBrowse>Show|Hide|Advanced</VisibleBrowse>
-        <VisibleEdit>Show|Hide|Advanced</VisibleEdit>
-        <VisibleNew>Show|Hide|Advanced</VisibleNew>
+        <VisibleBrowse>Show|Hide</VisibleBrowse>
+        <VisibleEdit>Show|Hide</VisibleEdit>
+        <VisibleNew>Show|Hide</VisibleNew>
       </Configuration>
     </Field>
     <Field name="DateTimeField" type="DateTime">
@@ -303,9 +325,9 @@
         <ReadOnly>false</ReadOnly>
         <Compulsory>false</Compulsory>
         <DefaultValue></DefaultValue>
-        <VisibleBrowse>Show|Hide|Advanced</VisibleBrowse>
-        <VisibleEdit>Show|Hide|Advanced</VisibleEdit>
-        <VisibleNew>Show|Hide|Advanced</VisibleNew>
+        <VisibleBrowse>Show|Hide</VisibleBrowse>
+        <VisibleEdit>Show|Hide</VisibleEdit>
+        <VisibleNew>Show|Hide</VisibleNew>
       </Configuration>
     </Field>
     <Field name="ReferenceField" type="Reference">
@@ -324,9 +346,9 @@
         <DefaultValue>/Root/Path1,/Root/Path2</DefaultValue>
         <ReadOnly>false</ReadOnly>
         <Compulsory>false</Compulsory>
-        <VisibleBrowse>Show|Hide|Advanced</VisibleBrowse>
-        <VisibleEdit>Show|Hide|Advanced</VisibleEdit>
-        <VisibleNew>Show|Hide|Advanced</VisibleNew>
+        <VisibleBrowse>Show|Hide</VisibleBrowse>
+        <VisibleEdit>Show|Hide</VisibleEdit>
+        <VisibleNew>Show|Hide</VisibleNew>
       </Configuration>
     </Field>
     <Field name="BinaryField" type="Binary">
@@ -337,9 +359,9 @@
         <ReadOnly>false</ReadOnly>
         <Compulsory>false</Compulsory>
         <DefaultValue></DefaultValue>
-        <VisibleBrowse>Show|Hide|Advanced</VisibleBrowse>
-        <VisibleEdit>Show|Hide|Advanced</VisibleEdit>
-        <VisibleNew>Show|Hide|Advanced</VisibleNew>
+        <VisibleBrowse>Show|Hide</VisibleBrowse>
+        <VisibleEdit>Show|Hide</VisibleEdit>
+        <VisibleNew>Show|Hide</VisibleNew>
       </Configuration>
     </Field>
   </Fields>

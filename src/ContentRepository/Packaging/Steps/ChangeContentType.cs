@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using SenseNet.ContentRepository;
 using SenseNet.ContentRepository.Schema;
@@ -31,7 +32,9 @@ namespace SenseNet.Packaging.Steps
 
             var count = 0;
 
-            foreach (var sourceContent in Search.ContentQuery.Query(ContentQuery).Nodes.Select(n => Content.Create(n)))
+            foreach (var sourceContent in Search.ContentQuery.QueryAsync(ContentQuery, CancellationToken.None)
+                .ConfigureAwait(false).GetAwaiter().GetResult()
+                .Nodes.Select(n => Content.Create(n)))
             {
                 try
                 {
@@ -58,14 +61,14 @@ namespace SenseNet.Packaging.Steps
                     }
 
                     // save the new content
-                    targetContent.Save();
+                    targetContent.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                     // delete the original
-                    sourceContent.ForceDelete();
+                    sourceContent.ForceDeleteAsync(CancellationToken.None).ConfigureAwait(false).GetAwaiter().GetResult();
 
                     // rename the target
                     targetContent["Name"] = sourceContent.Name;
-                    targetContent.Save(SavingMode.KeepVersion);
+                    targetContent.SaveAsync(SavingMode.KeepVersion, CancellationToken.None).GetAwaiter().GetResult();
 
                     count++;
 

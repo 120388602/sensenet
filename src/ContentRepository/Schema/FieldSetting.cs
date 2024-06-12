@@ -87,7 +87,7 @@ namespace SenseNet.ContentRepository.Schema
         // Properties /////////////////////////////////////////////////////////////
 
         [JsonProperty]
-        private string Type { get; }
+        public string Type { get; }
 
         private string _name;
         /// <summary>
@@ -1324,7 +1324,10 @@ namespace SenseNet.ContentRepository.Schema
             indexingInfo.FieldDataType = setting.FieldDataType;
 
             if (setting.Aspect == null)
-                ContentTypeManager.SetPerFieldIndexingInfo(setting.Name, setting.Owner.Name, indexingInfo);
+            {
+                if (setting.Owner != null) // testability
+                    ContentTypeManager.SetPerFieldIndexingInfo(setting.Name, setting.Owner.Name, indexingInfo);
+            }
             else
                 setting.Aspect.SetPerFieldIndexingInfo(setting.Name, indexingInfo);
         }
@@ -1424,8 +1427,18 @@ namespace SenseNet.ContentRepository.Schema
 
         public string EvaluateDefaultValue()
         {
-            var defaultValue = DefaultValue;
-            return defaultValue == null ? null : Evaluator.Evaluate(defaultValue);
+            return EvaluateDefaultValue(DefaultValue);
+        }
+        public static string EvaluateDefaultValue(string defaultValue)
+        {
+            if (string.IsNullOrEmpty(defaultValue))
+                return defaultValue;
+
+            // This is a workaround for enhancing the default value evaluation process with
+            // the template replacer feature: the latter is not available in the Storage layer.
+            var replaced = TemplateManager.Replace(typeof(DefaultValueTemplateReplacer), defaultValue);
+
+            return Evaluator.Evaluate(replaced);
         }
 
         public void WriteXml(XmlWriter writer)
@@ -1546,6 +1559,12 @@ namespace SenseNet.ContentRepository.Schema
         {
             if (value.HasValue)
                 WriteElement(writer, XmlConvert.ToString(value.Value), elementName);
+        }
+
+        protected void WriteElement(XmlWriter writer, DateTime? value, string elementName)
+        {
+            if (value.HasValue)
+                WriteElement(writer, XmlConvert.ToString(value.Value, XmlDateTimeSerializationMode.Utc), elementName);
         }
 
         protected void WriteElement(XmlWriter writer, string value, string elementName)

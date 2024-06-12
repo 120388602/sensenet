@@ -2,8 +2,10 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Xml;
 using SenseNet.ContentRepository;
+using SenseNet.Storage;
 
 namespace SenseNet.Packaging.Steps
 {
@@ -70,7 +72,9 @@ namespace SenseNet.Packaging.Steps
                     dir = context.TargetPath;
                     pattern = path;
                 }
-                var files = Directory.GetFiles(dir, pattern);
+                var files = pattern.StartsWith("*.") && !pattern.Substring(1).Contains(".")
+                    ? FileSystemWrapper.Directory.GetFilesByExtension(path, pattern.Substring(1))
+                    : Directory.GetFiles(dir, pattern);
                 pathList.AddRange(isRooted ? files : files.Select(f => f.Substring(context.TargetPath.Length + 1)));
             }
             else
@@ -83,7 +87,8 @@ namespace SenseNet.Packaging.Steps
         {
             context.AssertRepositoryStarted();
 
-            var result = Search.ContentQuery.Query(ContentQuery);
+            var result = Search.ContentQuery.QueryAsync(ContentQuery, CancellationToken.None)
+                .ConfigureAwait(false).GetAwaiter().GetResult();
             Logger.LogMessage("Content query result count: ", result.Count);
             return result.Nodes.Select(Content.Create);
         }

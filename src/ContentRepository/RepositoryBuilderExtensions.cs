@@ -1,12 +1,18 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using SenseNet.Communication.Messaging;
+using SenseNet.ContentRepository;
+using SenseNet.ContentRepository.Search;
+using SenseNet.ContentRepository.Search.Indexing;
 using SenseNet.ContentRepository.Sharing;
 using SenseNet.ContentRepository.Storage;
 using SenseNet.ContentRepository.Storage.AppModel;
 using SenseNet.ContentRepository.Storage.Caching;
 using SenseNet.ContentRepository.Storage.Data;
+using SenseNet.ContentRepository.Storage.DataModel;
 using SenseNet.ContentRepository.Storage.Events;
 using SenseNet.ContentRepository.Storage.Security;
 using SenseNet.Diagnostics;
@@ -16,7 +22,8 @@ using SenseNet.Security;
 using SenseNet.Security.Messaging;
 using SenseNet.Tools;
 
-namespace SenseNet.ContentRepository
+// ReSharper disable once CheckNamespace
+namespace SenseNet.Extensions.DependencyInjection
 {
     /// <summary>
     /// Extension methods for the IRepositoryBuilder interface to let developers
@@ -29,17 +36,25 @@ namespace SenseNet.ContentRepository
         /// </summary>
         /// <param name="repositoryBuilder"></param>
         /// <param name="dataProvider">DataProvider instance.</param>
+        [Obsolete("Do not use this method anymore. Register DataProvider as a service instead.", true)]
         public static IRepositoryBuilder UseDataProvider(this IRepositoryBuilder repositoryBuilder, DataProvider dataProvider)
         {
-            Configuration.Providers.Instance.DataProvider = dataProvider;
-            WriteLog("DataProvider", dataProvider);
+            return repositoryBuilder;
+        }
 
-            if (dataProvider != null)
-            {
-                CommonComponents.TransactionFactory = dataProvider;
-                WriteLog("TransactionFactory", dataProvider);
-            }
+        /// <summary>
+        /// Sets the <see cref="InitialData"/> that will be installed to the database in the repository start sequence.
+        /// </summary>
+        /// <param name="repositoryBuilder"></param>
+        /// <param name="initialData">Data file instance.</param>
+        /// <returns></returns>
+        public static IRepositoryBuilder UseInitialData(this IRepositoryBuilder repositoryBuilder, InitialData initialData)
+        {
+            if (!(repositoryBuilder is RepositoryBuilder repoBuilder))
+                throw new ApplicationException(
+                    $"The repositoryBuilder is not an instance of {typeof(RepositoryBuilder).FullName}.");
 
+            repoBuilder.InitialData = initialData;
             return repositoryBuilder;
         }
 
@@ -51,11 +66,12 @@ namespace SenseNet.ContentRepository
         public static IRepositoryBuilder UseBlobMetaDataProvider(this IRepositoryBuilder repositoryBuilder, IBlobStorageMetaDataProvider metaDataProvider)
         {
             Configuration.Providers.Instance.BlobMetaDataProvider = metaDataProvider;
+
             WriteLog("BlobMetaDataProvider", metaDataProvider);
 
             return repositoryBuilder;
         }
-
+        
         /// <summary>
         /// Sets the blob provider selector.
         /// </summary>
@@ -66,6 +82,30 @@ namespace SenseNet.ContentRepository
             Configuration.Providers.Instance.BlobProviderSelector = selector;
             WriteLog("BlobProviderSelector", selector);
 
+            return repositoryBuilder;
+        }
+
+        /// <summary>
+        /// Sets the blob provider store.
+        /// </summary>
+        /// <param name="repositoryBuilder"></param>
+        /// <param name="store">IBlobProviderStore instance.</param>
+        public static IRepositoryBuilder UseBlobProviderStore(this IRepositoryBuilder repositoryBuilder, IBlobProviderStore store)
+        {
+            Configuration.Providers.Instance.BlobProviders = store;
+            WriteLog("IBlobProviderStore", store);
+
+            return repositoryBuilder;
+        }
+
+        /// <summary>
+        /// Legacy API for tests and tools. In production use the AddSenseNetBlobProvider method
+        /// instead to register a blob provider service in DI.
+        /// </summary>
+        public static IRepositoryBuilder AddBlobProvider(this IRepositoryBuilder repositoryBuilder,
+            IBlobProvider provider)
+        {
+            Configuration.Providers.Instance.BlobProviders.AddProvider(provider);
             return repositoryBuilder;
         }
 
@@ -87,11 +127,9 @@ namespace SenseNet.ContentRepository
         /// </summary>
         /// <param name="repositoryBuilder"></param>
         /// <param name="permissionFilterFactory">IPermissionFilterFactory implementation instance.</param>
+        [Obsolete("Do not use this method anymore. Register IPermissionFilterFactory as a service instead.", true)]
         public static IRepositoryBuilder UsePermissionFilterFactory(this IRepositoryBuilder repositoryBuilder, IPermissionFilterFactory permissionFilterFactory)
         {
-            Configuration.Providers.Instance.PermissionFilterFactory = permissionFilterFactory;
-            WriteLog("PermissionFilterFactory", permissionFilterFactory);
-
             return repositoryBuilder;
         }
 
@@ -100,11 +138,9 @@ namespace SenseNet.ContentRepository
         /// </summary>
         /// <param name="repositoryBuilder"></param>
         /// <param name="securityDataProvider">ISecurityDataProvider instance.</param>
+        [Obsolete("Do not use this method anymore. Register ISecurityDataProvider as a service instead.", true)]
         public static IRepositoryBuilder UseSecurityDataProvider(this IRepositoryBuilder repositoryBuilder, ISecurityDataProvider securityDataProvider)
         {
-            Configuration.Providers.Instance.SecurityDataProvider = securityDataProvider;
-            WriteLog("SecurityDataProvider", securityDataProvider);
-
             return repositoryBuilder;
         }
 
@@ -113,11 +149,9 @@ namespace SenseNet.ContentRepository
         /// </summary>
         /// <param name="repositoryBuilder"></param>
         /// <param name="securityMessageProvider">IMessageProvider instance that will handle security-related messages.</param>
+        [Obsolete("Do not use this method anymore. Register IMessageProvider as a service instead.", true)]
         public static IRepositoryBuilder UseSecurityMessageProvider(this IRepositoryBuilder repositoryBuilder, IMessageProvider securityMessageProvider)
         {
-            Configuration.Providers.Instance.SecurityMessageProvider = securityMessageProvider;
-            WriteLog("SecurityMessageProvider", securityMessageProvider);
-
             return repositoryBuilder;
         }
 
@@ -126,11 +160,9 @@ namespace SenseNet.ContentRepository
         /// </summary>
         /// <param name="repositoryBuilder"></param>
         /// <param name="cacheProvider">ICache instance.</param>
+        [Obsolete("Do not use this method anymore. Register ISnCache as a service instead.", true)]
         public static IRepositoryBuilder UseCacheProvider(this IRepositoryBuilder repositoryBuilder, ISnCache cacheProvider)
         {
-            Configuration.Providers.Instance.CacheProvider = cacheProvider;
-            WriteLog("CacheProvider", cacheProvider);
-
             return repositoryBuilder;
         }
 
@@ -139,11 +171,9 @@ namespace SenseNet.ContentRepository
         /// </summary>
         /// <param name="repositoryBuilder"></param>
         /// <param name="applicationCacheProvider">IApplicationCache instance.</param>
+        [Obsolete("Do not use this method anymore. Register IApplicationCache as a service instead.", true)]
         public static IRepositoryBuilder UseApplicationCacheProvider(this IRepositoryBuilder repositoryBuilder, IApplicationCache applicationCacheProvider)
         {
-            Configuration.Providers.Instance.ApplicationCacheProvider = applicationCacheProvider;
-            WriteLog("ApplicationCacheProvider", applicationCacheProvider);
-
             return repositoryBuilder;
         }
 
@@ -163,11 +193,9 @@ namespace SenseNet.ContentRepository
         /// <summary>
         /// Sets the elevated modification visibility rule provider.
         /// </summary>
+        [Obsolete("Do not use this method anymore. Register ElevatedModificationVisibilityRule as a service instead.", true)]
         public static IRepositoryBuilder UseElevatedModificationVisibilityRuleProvider(this IRepositoryBuilder repositoryBuilder, ElevatedModificationVisibilityRule modificationVisibilityRuleProvider)
         {
-            Configuration.Providers.Instance.ElevatedModificationVisibilityRuleProvider = modificationVisibilityRuleProvider;
-            WriteLog("ElevatedModificationVisibilityRuleProvider", modificationVisibilityRuleProvider);
-
             return repositoryBuilder;
         }
 
@@ -184,16 +212,19 @@ namespace SenseNet.ContentRepository
             return repositoryBuilder;
         }
 
-        /// <summary>
-        /// Sets the membership extender used for extending user membership on-the-fly.
-        /// </summary>
-        /// <param name="repositoryBuilder"></param>
-        /// <param name="membershipExtender">MembershipExtender instance.</param>
-        public static IRepositoryBuilder UseMembershipExtender(this IRepositoryBuilder repositoryBuilder, MembershipExtenderBase membershipExtender)
+        [Obsolete("Do not use this method anymore. Register ISearchManager as a service instead.", true)]
+        public static IRepositoryBuilder UseSearchManager(this IRepositoryBuilder repositoryBuilder, ISearchManager searchManager)
         {
-            Configuration.Providers.Instance.MembershipExtender = membershipExtender;
-            WriteLog("MembershipExtender", membershipExtender);
-
+            return repositoryBuilder;
+        }
+        [Obsolete("Do not use this method anymore. Register IIndexManager as a service instead.", true)]
+        public static IRepositoryBuilder UseIndexManager(this IRepositoryBuilder repositoryBuilder, IIndexManager indexManager)
+        {
+            return repositoryBuilder;
+        }
+        [Obsolete("Do not use this method anymore. Register IIndexPopulator as a service instead.", true)]
+        public static IRepositoryBuilder UseIndexPopulator(this IRepositoryBuilder repositoryBuilder, IIndexPopulator indexPopulator)
+        {
             return repositoryBuilder;
         }
 
@@ -206,7 +237,11 @@ namespace SenseNet.ContentRepository
             // Old behavior: set a property on the instance that will be used
             // by the repo start process later.
             if (repositoryBuilder is RepositoryBuilder repoBuilder)
-                repoBuilder.TraceCategories = categoryNames;
+            {
+                repoBuilder.TraceCategories = repoBuilder.TraceCategories == null
+                    ? categoryNames
+                    : repoBuilder.TraceCategories.Union(categoryNames).Distinct().ToArray();
+            }
             else
                 throw new NotImplementedException();
 
@@ -225,22 +260,34 @@ namespace SenseNet.ContentRepository
         /// <summary>
         /// Sets tracer instances.
         /// </summary>
+        [Obsolete("Register ISnTracer types in the service container instead.", true)]
         public static IRepositoryBuilder UseTracer(this IRepositoryBuilder repositoryBuilder, params ISnTracer[] tracer)
         {
-            // store tracers in the provider collection temporarily
-            Configuration.Providers.Instance.SetProvider(typeof(ISnTracer[]), tracer);
             return repositoryBuilder;
         }
 
         /// <summary>
-        /// Gets or sets the provider responsible for formatting sharing notification
-        /// email subject and body. Developers may customize the values and variables
-        /// available in these texts.
+        /// Adds the registered IEventLogger instance to the repository builder.
         /// </summary>
-        public static IRepositoryBuilder UseSharingNotificationFormatter(this IRepositoryBuilder repositoryBuilder, ISharingNotificationFormatter formatter)
+        public static IRepositoryBuilder UseLogger(this IRepositoryBuilder repositoryBuilder, IServiceProvider provider)
         {
-            SharingHandler.NotificationFormatter = formatter;
+            var logger = provider.GetService<IEventLogger>();
+            if (logger != null)
+                repositoryBuilder.UseLogger(logger);
 
+            // stores a logger instance for later use
+            var genericLogger = provider.GetService<ILogger<SnILogger>>();
+            if (genericLogger != null)
+                repositoryBuilder.SetProvider<ILogger<SnILogger>>(genericLogger);
+
+            return repositoryBuilder;
+        }
+        /// <summary>
+        /// Adds the registered ISnTracer instance to the repository builder.
+        /// </summary>
+        [Obsolete("Register ISnTracer types in the service container instead.", true)]
+        public static IRepositoryBuilder UseTracer(this IRepositoryBuilder repositoryBuilder, IServiceProvider provider)
+        {
             return repositoryBuilder;
         }
 
@@ -267,6 +314,21 @@ namespace SenseNet.ContentRepository
         public static IRepositoryBuilder UseProvider(this IRepositoryBuilder repositoryBuilder, object provider)
         {
             repositoryBuilder.SetProvider(provider);
+
+            return repositoryBuilder;
+        }
+        
+        /// <summary>
+        /// Registers one or more features in the system, represented by component instances.
+        /// Do not use this method directly in your code, it is intended to be used by the system.
+        /// Use the AddComponent extension method for the IServiceCollection api instead.
+        /// </summary>
+        public static IRepositoryBuilder UseComponent(this IRepositoryBuilder repositoryBuilder, params ISnComponent[] components)
+        {
+            foreach (var component in components)
+            {
+                Configuration.Providers.Instance.AddComponent(component);
+            }
 
             return repositoryBuilder;
         }
@@ -405,6 +467,15 @@ namespace SenseNet.ContentRepository
 
                 Configuration.Providers.Instance.NodeObservers = observers.ToArray();
             }
+
+            return repositoryBuilder;
+        }
+
+        public static IRepositoryBuilder SetProvider<T>(this IRepositoryBuilder repositoryBuilder, T provider)
+        {
+            var providerType = typeof(T);
+            Configuration.Providers.Instance.SetProvider(providerType, provider);
+            WriteLog(providerType.Name, provider);
 
             return repositoryBuilder;
         }

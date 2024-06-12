@@ -1,16 +1,16 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
-using SenseNet.ContentRepository;
+using System.Threading;
 using SenseNet.ContentRepository.Storage;
 using SenseNet.ContentRepository.Storage.Search;
 using SenseNet.ContentRepository.Storage.Security;
 using SenseNet.Search;
 using SenseNet.Communication.Messaging;
+using SenseNet.Configuration;
 using SenseNet.ContentRepository.Search;
-using SenseNet.ContentRepository.Search.Querying;
 using SafeQueries = SenseNet.ContentRepository.SafeQueries;
+using Task = System.Threading.Tasks.Task;
 
 namespace SenseNet.ApplicationModel
 {
@@ -18,7 +18,7 @@ namespace SenseNet.ApplicationModel
     {
         internal static void Reset()
         {
-            new DeviceManagerResetDistributedAction().Execute();
+            new DeviceManagerResetDistributedAction().ExecuteAsync(CancellationToken.None).GetAwaiter().GetResult();
         }
         private static void ResetPrivate()
         {
@@ -27,12 +27,15 @@ namespace SenseNet.ApplicationModel
         [Serializable]
         internal sealed class DeviceManagerResetDistributedAction : DistributedAction
         {
-            public override void DoAction(bool onRemote, bool isFromMe)
+            public override string TraceMessage => null;
+
+            public override Task DoActionAsync(bool onRemote, bool isFromMe, CancellationToken cancellationToken)
             {
                 // Local echo of my action: Return without doing anything
                 if (onRemote && isFromMe)
-                    return;
+                    return Task.CompletedTask;
                 DeviceManager.ResetPrivate();
+                return Task.CompletedTask;
             }
         }
 
@@ -74,7 +77,7 @@ namespace SenseNet.ApplicationModel
                         if (__instance == null)
                         {
                             // install time there is no Device type yet
-                            if (ActiveSchema.NodeTypes["Device"] == null)
+                            if (Providers.Instance.StorageSchema.NodeTypes["Device"] == null)
                                 return null;
 
                             // Elevation: initializing and caching devices
@@ -96,15 +99,18 @@ namespace SenseNet.ApplicationModel
             List<Device> devices;
             var sorted = new List<Device>();
 
-            if (SearchManager.ContentQueryIsAllowed)
+            if (Providers.Instance.SearchManager.ContentQueryIsAllowed)
             {
-                var result = ContentQuery.Query(SafeQueries.AllDevices);
+                var result = ContentQuery.QueryAsync(SafeQueries.AllDevices, CancellationToken.None)
+                    .ConfigureAwait(false).GetAwaiter().GetResult();
                 devices = result.Nodes.Cast<Device>().ToList();
             }
             else
             {
                 // query devices and sort them by Index
-                devices = NodeQuery.QueryNodesByTypeAndPath(ActiveSchema.NodeTypes["Device"], false, "/Root/System/Devices", false).Nodes.Cast<Device>().ToList();
+                devices = NodeQuery.QueryNodesByTypeAndPath(
+                    Providers.Instance.StorageSchema.NodeTypes["Device"], false, "/Root/System/Devices", false)
+                    .Nodes.Cast<Device>().ToList();
             }
 
             devices.Sort(new NodeComparer<Node>());

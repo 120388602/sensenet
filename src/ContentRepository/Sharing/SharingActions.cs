@@ -13,7 +13,12 @@ namespace SenseNet.ContentRepository.Sharing
         /// <summary>
         /// Gets a list of all sharing records on a content.
         /// </summary>
+        /// <snCategory>Sharing</snCategory>
+        /// <param name="content"></param>
+        /// <returns></returns>
         [ODataFunction]
+        [AllowedRoles(N.R.Everyone)]
+        [RequiredPermissions(N.P.Save, N.P.SetPermissions)]
         public static object GetSharing(Content content)
         {
             var gc = EnsureContent(content);
@@ -24,6 +29,7 @@ namespace SenseNet.ContentRepository.Sharing
         /// <summary>
         /// Shares a content with somebody.
         /// </summary>
+        /// <snCategory>Sharing</snCategory>
         /// <param name="content"></param>
         /// <param name="token">An identifier token: an email address, a username or a user or group id.</param>
         /// <param name="level">What permissions will the user get for the content.</param>
@@ -31,6 +37,9 @@ namespace SenseNet.ContentRepository.Sharing
         /// <param name="sendNotification">Whether a notification email should be sent to the target user.</param>
         /// <returns>A sharing record representing the new share.</returns>
         [ODataAction]
+        [AllowedRoles(N.R.Everyone)]
+        [RequiredPermissions(N.P.Save, N.P.SetPermissions)]
+        [Scenario(N.S.ContextMenu, N.S.BatchActions)]
         public static object Share(Content content, string token, SharingLevel level, SharingMode mode, bool sendNotification)
         {
             var gc = EnsureContent(content);
@@ -40,10 +49,13 @@ namespace SenseNet.ContentRepository.Sharing
         /// <summary>
         /// Remove a sharing record from a content.
         /// </summary>
+        /// <snCategory>Sharing</snCategory>
         /// <param name="content"></param>
         /// <param name="id">Identifier of a sharing record.</param>
         /// <returns>Returns true if the system has found and removed the sharing record.</returns>
         [ODataAction]
+        [AllowedRoles(N.R.Everyone)]
+        [RequiredPermissions(N.P.Save, N.P.SetPermissions)]
         public static object RemoveSharing(Content content, string id)
         {
             var gc = EnsureContent(content);

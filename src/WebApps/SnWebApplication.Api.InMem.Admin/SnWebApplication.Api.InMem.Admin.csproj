@@ -1,0 +1,25 @@
+﻿<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+	  <EnableUnsafeBinaryFormatterSerialization>true</EnableUnsafeBinaryFormatterSerialization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="6.0.9" />
+    <PackageReference Include="SenseNet.AI.Text.SemanticKernel" Version="0.0.3" />
+    <PackageReference Include="SenseNet.AI.Vision.Azure" Version="0.0.1-beta1" />
+    <PackageReference Include="Serilog.AspNetCore" Version="6.0.1" />
+    <PackageReference Include="Serilog.Sinks.Graylog" Version="2.3.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\ContentRepository.InMemory\SenseNet.ContentRepository.InMemory.csproj" />
+    <ProjectReference Include="..\..\OData\SenseNet.OData.csproj" />
+    <ProjectReference Include="..\..\OpenApi\SenseNet.OpenApi.csproj" />
+    <ProjectReference Include="..\..\Services.Core\SenseNet.Services.Core.csproj" />
+    <ProjectReference Include="..\..\Services.Wopi\SenseNet.Services.Wopi.csproj" />
+    <ProjectReference Include="..\..\WebHooks\SenseNet.WebHooks.csproj" />
+  </ItemGroup>
+
+</Project>

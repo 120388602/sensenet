@@ -4,6 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace SenseNet.Packaging.Steps.Internal
@@ -21,12 +22,13 @@ namespace SenseNet.Packaging.Steps.Internal
         {
             using (new SystemAccount())
             {
-                var result = ContentQuery.Query(SafeQueries.ConnectedAbortedAndCompletedWorkflows, QuerySettings.AdminSettings, WorkflowInstanceClearedGuid);
+                var result = ContentQuery.QueryAsync(SafeQueries.ConnectedAbortedAndCompletedWorkflows, QuerySettings.AdminSettings,
+                    CancellationToken.None, WorkflowInstanceClearedGuid).ConfigureAwait(false).GetAwaiter().GetResult();
 
                 foreach (var item in result.Nodes)
                 {
                     item["WorkflowInstanceGuid"] = WorkflowInstanceClearedGuid;
-                    item.Save();
+                    item.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                 }
 
                 if (result.Count < 1)

@@ -4,11 +4,39 @@
   <Description>$Ctd-Group,Description</Description>
   <Icon>Group</Icon>
   <Fields>
+    <Field name="Name" type="ShortText">
+      <DisplayName>$Ctd-Group,Name-DisplayName</DisplayName>
+      <Description>$Ctd-Group,Name-Description</Description>
+      <Configuration>
+        <FieldIndex>30</FieldIndex>
+        <VisibleBrowse>Show</VisibleBrowse>
+        <VisibleEdit>Show</VisibleEdit>
+        <VisibleNew>Show</VisibleNew>
+        <Compulsory>true</Compulsory>
+        <MaxLength>20</MaxLength>
+        <ControlHint>sn:ShortText</ControlHint>
+      </Configuration>
+    </Field>
+    <Field name="DisplayName" type="ShortText">
+      <Configuration>
+        <FieldIndex>20</FieldIndex>
+        <VisibleBrowse>Show</VisibleBrowse>
+        <VisibleEdit>Show</VisibleEdit>
+        <VisibleNew>Show</VisibleNew>
+      </Configuration>
+    </Field>
+    <Field name="Version" type="Version">
+      <Configuration>
+        <VisibleBrowse>Hide</VisibleBrowse>
+        <VisibleEdit>Hide</VisibleEdit>
+        <VisibleNew>Hide</VisibleNew>
+      </Configuration>
+    </Field>
     <Field name="Members" type="Reference">
       <DisplayName>$Ctd-Group,Members-DisplayName</DisplayName>
       <Description>$Ctd-Group,Members-Description</Description>
       <Configuration>
-        <!--<ReadOnly>true</ReadOnly>-->
+        <FieldIndex>10</FieldIndex>
         <AllowMultiple>true</AllowMultiple>
         <AllowedTypes>
           <Type>User</Type>
@@ -18,14 +46,17 @@
           <Path>/Root/IMS</Path>
           <Path>/Root</Path>
         </SelectionRoot>
+        <VisibleBrowse>Show</VisibleBrowse>
+        <VisibleEdit>Show</VisibleEdit>
+        <VisibleNew>Show</VisibleNew>
       </Configuration>
     </Field>
     <Field name="SyncGuid" type="ShortText">
       <DisplayName>$Ctd-Group,SyncGuid-DisplayName</DisplayName>
       <Description>$Ctd-Group,SyncGuid-Description</Description>
       <Configuration>
-        <VisibleBrowse>Advanced</VisibleBrowse>
-        <VisibleEdit>Advanced</VisibleEdit>
+        <VisibleBrowse>Hide</VisibleBrowse>
+        <VisibleEdit>Hide</VisibleEdit>
         <VisibleNew>Hide</VisibleNew>
       </Configuration>
     </Field>
@@ -34,16 +65,51 @@
       <Description>$Ctd-Group,LastSync-Description</Description>
       <Configuration>
         <DateTimeMode>DateAndTime</DateTimeMode>
-        <VisibleBrowse>Advanced</VisibleBrowse>
-        <VisibleEdit>Advanced</VisibleEdit>
+        <VisibleBrowse>Hide</VisibleBrowse>
+        <VisibleEdit>Hide</VisibleEdit>
         <VisibleNew>Hide</VisibleNew>
       </Configuration>
     </Field>
-    <Field name="Description" type="LongText">
+    <Field name="Index" type="Integer">
+      <DisplayName>$Ctd-Group,Index-DisplayName</DisplayName>
+      <Description>$Ctd-Group,Index-Description</Description>
       <Configuration>
-        <VisibleBrowse>Advanced</VisibleBrowse>
-        <VisibleEdit>Advanced</VisibleEdit>
-        <VisibleNew>Advanced</VisibleNew>
+        <VisibleBrowse>Show</VisibleBrowse>
+        <VisibleEdit>Show</VisibleEdit>
+        <VisibleNew>Show</VisibleNew>
+      </Configuration>
+    </Field>
+    <Field name="Description" type="RichText">
+      <Configuration>
+        <VisibleBrowse>Show</VisibleBrowse>
+        <VisibleEdit>Show</VisibleEdit>
+        <VisibleNew>Show</VisibleNew>
+      </Configuration>
+    </Field>
+    <Field name="AllRoles" type="AllRoles">
+      <DisplayName>$Ctd-Group,AllRoles-DisplayName</DisplayName>
+      <Description>$Ctd-Group,AllRoles-Description</Description>
+      <Indexing>
+        <Mode>No</Mode>
+        <Store>No</Store>
+      </Indexing>
+      <Configuration>
+        <VisibleBrowse>Hide</VisibleBrowse>
+        <VisibleEdit>Hide</VisibleEdit>
+        <VisibleNew>Hide</VisibleNew>
+      </Configuration>
+    </Field>
+    <Field name="DirectRoles" type="DirectRoles">
+      <DisplayName>$Ctd-Group,DirectRoles-DisplayName</DisplayName>
+      <Description>$Ctd-Group,DirectRoles-Description</Description>
+      <Indexing>
+        <Mode>No</Mode>
+        <Store>No</Store>
+      </Indexing>
+      <Configuration>
+        <VisibleBrowse>Hide</VisibleBrowse>
+        <VisibleEdit>Hide</VisibleEdit>
+        <VisibleNew>Hide</VisibleNew>
       </Configuration>
     </Field>
   </Fields>

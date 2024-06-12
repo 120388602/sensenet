@@ -1,7 +1,7 @@
 <ContentType name="Email" parentType="Folder" handler="SenseNet.ContentRepository.Folder" xmlns="http://schemas.sensenet.com/SenseNet/ContentRepository/ContentTypeDefinition">
   <DisplayName>$Ctd-Email,DisplayName</DisplayName>
   <Description>$Ctd-Email,Description</Description>
-  <Icon>Document</Icon>
+  <Icon>Email</Icon>
   <AllowIncrementalNaming>true</AllowIncrementalNaming>
   <AllowedChildTypes>
     File
@@ -15,13 +15,9 @@
       <DisplayName>$Ctd-Email,DisplayName-DisplayName</DisplayName>
       <Description>$Ctd-Email,DisplayName-Description</Description>
     </Field>
-    <Field name="Body" type="LongText">
+    <Field name="Body" type="RichText">
       <DisplayName>$Ctd-Email,Body-DisplayName</DisplayName>
       <Description>$Ctd-Email,Body-Description</Description>
-      <Configuration>
-        <ControlHint>sn:RichText</ControlHint>
-        <TextType>RichText</TextType>
-      </Configuration>
     </Field>
     <Field name="Sent" type="DateTime">
       <DisplayName>$Ctd-Email,Sent-DisplayName</DisplayName>

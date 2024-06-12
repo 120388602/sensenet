@@ -9,7 +9,6 @@ using SenseNet.ContentRepository.Storage.Search;
 using SenseNet.ContentRepository.Storage.Security;
 using SenseNet.ContentRepository.Security.ADSync;
 using System.Collections.Generic;
-using System.Diagnostics;
 using SenseNet.Diagnostics;
 using SenseNet.ContentRepository.Storage.Schema;
 using SenseNet.ContentRepository.Fields;
@@ -17,14 +16,17 @@ using System.Security.Principal;
 using SenseNet.Search;
 using System.Xml.Serialization;
 using System.IO;
+using System.Threading;
 using SenseNet.Configuration;
-using SenseNet.ContentRepository.Search;
 using SenseNet.ContentRepository.Search.Querying;
 using SenseNet.ContentRepository.Setting;
 using SenseNet.Search.Querying;
 using SenseNet.Security;
 using SenseNet.Tools;
 using Retrier = SenseNet.ContentRepository.Storage.Retrier;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
+using SenseNet.ContentRepository.Security.MultiFactor;
 
 namespace SenseNet.ContentRepository
 {
@@ -35,6 +37,7 @@ namespace SenseNet.ContentRepository
     public class User : GenericContent, IUser, IADSyncable, SenseNet.Security.ISecurityUser
     {
         private const string Profiles = "Profiles";
+        private const string AnyDomain = "*";
 
         /// <summary>
         /// Gets the Administrator user.
@@ -57,6 +60,8 @@ namespace SenseNet.ContentRepository
         /// Gets the Visitor user.
         /// </summary>
         public static User Visitor => SystemAccount.Execute(() => Load<User>(Identifiers.VisitorUserId));
+        public static User DefaultUser => SystemAccount.Execute(() => Load<User>(AccessProvider.Current.DefaultUserId));
+        public static User PublicAdministrator => SystemAccount.Execute(() => Load<User>(Identifiers.PublicAdminPath));
 
         private static User _somebody;
         private static object _somebodyLock = new object();
@@ -131,13 +136,19 @@ namespace SenseNet.ContentRepository
             set { _windowsIdentity = value; }
         }
 
+        private bool _inactivating;
         /// <inheritdoc />
         /// <remarks>Persisted as <see cref="RepositoryDataType.Int"/>.</remarks>
         [RepositoryProperty("Enabled", RepositoryDataType.Int)]
         public bool Enabled
         {
             get { return this.GetProperty<int>("Enabled") != 0; }
-            set { this["Enabled"] = value ? 1 : 0; }
+            set
+            {
+                this["Enabled"] = value ? 1 : 0;
+                if (this.Id != 0 && !value)
+                    _inactivating = true;
+            }
         }
 
         /// <inheritdoc />
@@ -266,6 +277,10 @@ namespace SenseNet.ContentRepository
             }
         }
 
+        // there is no need for group check in case of system user
+        public bool IsOperator =>
+            Id == Identifiers.SystemUserId || SystemAccount.Execute(() => IsInGroup(Group.Operators));
+
         /// <inheritdoc />
         public override string Name
         {
@@ -339,6 +354,103 @@ namespace SenseNet.ContentRepository
             set { SetReferences(FOLLOWEDWORKSPACES, value); }
         }
 
+        [RepositoryProperty(nameof(MultiFactorEnabled), RepositoryDataType.Int)]
+        public bool MultiFactorEnabled
+        {
+            get => this.GetProperty<int>(nameof(MultiFactorEnabled)) != 0;
+            set => this[nameof(MultiFactorEnabled)] = value ? 1 : 0;
+        }
+        
+        [RepositoryProperty(nameof(MultiFactorRegistered), RepositoryDataType.Int)]
+        public bool MultiFactorRegistered
+        {
+            get => this.GetProperty<int>(nameof(MultiFactorRegistered)) != 0;
+            set => this[nameof(MultiFactorRegistered)] = value ? 1 : 0;
+        }
+
+        /// <summary>
+        /// Gets whether MFA is enabled or forced globally or on this user.
+        /// </summary>
+        public bool EffectiveMultiFactorEnabled
+        {
+            get
+            {
+                var mfaMode = Settings.GetValue<MultiFactorMode>("MultiFactorAuthentication", "MultiFactorAuthentication",
+                    this.Path);
+
+                // merge enabled state into a single effective property
+                return mfaMode switch
+                {
+                    MultiFactorMode.Disabled => false,
+                    MultiFactorMode.Forced => true,
+                    _ => MultiFactorEnabled
+                };
+            }
+        }
+
+        public string QrCodeSetupImageUrl
+        {
+            get
+            {
+                if (!EffectiveMultiFactorEnabled)
+                    return string.Empty;
+
+                // if already generated and cached
+                if (GetCachedData(nameof(QrCodeSetupImageUrl)) is string imageUrl) 
+                    return imageUrl;
+                
+                var (url, entryKey) = Providers.Instance.MultiFactorAuthenticationProvider.GenerateSetupCode(
+                    GetTwoFactorAccountName(), TwoFactorKey);
+
+                SetCachedData(nameof(QrCodeSetupImageUrl), url);
+                SetCachedData(nameof(ManualEntryKey), entryKey);
+
+                imageUrl = url;
+
+                return imageUrl;
+            }
+        }
+        public string ManualEntryKey
+        {
+            get
+            {
+                if (!EffectiveMultiFactorEnabled)
+                    return string.Empty;
+
+                // if already generated and cached
+                if (GetCachedData(nameof(ManualEntryKey)) is string manualEntryKey) 
+                    return manualEntryKey;
+                
+                var (url, entryKey) = Providers.Instance.MultiFactorAuthenticationProvider.GenerateSetupCode(
+                    GetTwoFactorAccountName(), TwoFactorKey);
+
+                SetCachedData(nameof(QrCodeSetupImageUrl), url);
+                SetCachedData(nameof(ManualEntryKey), entryKey);
+
+                manualEntryKey = entryKey;
+
+                return manualEntryKey;
+            }
+        }
+
+        public string TwoFactorKey
+        {
+            get
+            {
+                // if already cached
+                if (GetCachedData(nameof(TwoFactorKey)) is string twoFactorKey)
+                    return twoFactorKey;
+
+                if (this.Id == 0)
+                    return null;
+
+                var twoFactorToken = AccessTokenVault.GetOrAddToken(this.Id, TimeSpan.MaxValue, Id, "2fa");
+
+                SetCachedData(nameof(TwoFactorKey), twoFactorToken.Value);
+
+                return twoFactorToken.Value;
+            }
+        }
 
         // =================================================================================== Construction
 
@@ -403,15 +515,27 @@ namespace SenseNet.ContentRepository
         /// <returns></returns>
         public static User Load(string domain, string name, ExecutionHint hint)
         {
-            domain = string.IsNullOrWhiteSpace(domain) ? IdentityManagement.DefaultDomain : domain;
+            if (string.IsNullOrWhiteSpace(domain))
+            {
+                switch (IdentityManagement.DomainUsagePolicy)
+                {
+                    case DomainUsagePolicy.NoDomain: domain = AnyDomain; break;
+                    case DomainUsagePolicy.DefaultDomain: domain = IdentityManagement.DefaultDomain; break;
+                    case DomainUsagePolicy.MandatoryDomain: return null;
+                    default:
+                        throw new ArgumentOutOfRangeException(
+                            "Unknown DomainUsagePolicy: " + IdentityManagement.DomainUsagePolicy);
+                }
+            }
+
             if (domain == null)
                 throw new ArgumentNullException(nameof(domain));
             if (name == null)
                 throw new ArgumentNullException(nameof(name));
 
-            // look for the user ID in the cache by the doman-username key
+            // look for the user ID in the cache by the domain-username key
             var ck = GetUserCacheKey(domain, name);
-            var userIdobject = DistributedApplication.Cache.Get(ck);
+            var userIdobject = Cache.Get(ck);
             if (userIdobject != null)
             {
                 var userId = Convert.ToInt32(userIdobject);
@@ -420,8 +544,11 @@ namespace SenseNet.ContentRepository
                     return cachedUser;
             }
 
-            var domainPath = string.Concat(RepositoryStructure.ImsFolderPath, RepositoryPath.PathSeparator, domain);
-            var type = ActiveSchema.NodeTypes[typeof(User).Name];
+            var domainPath = RepositoryStructure.ImsFolderPath;
+            if(domain != AnyDomain)
+                domainPath += RepositoryPath.PathSeparator + domain;
+
+            var type = Providers.Instance.StorageSchema.NodeTypes[typeof(User).Name];
 
             User user;
             bool forceCql;
@@ -429,7 +556,7 @@ namespace SenseNet.ContentRepository
             switch (hint)
             {
                 case ExecutionHint.None: 
-                    forceCql = SearchManager.ContentQueryIsAllowed; break;
+                    forceCql = Providers.Instance.SearchManager.ContentQueryIsAllowed; break;
                 case ExecutionHint.ForceIndexedEngine: 
                     forceCql = true; break;
                 case ExecutionHint.ForceRelationalEngine: 
@@ -442,7 +569,8 @@ namespace SenseNet.ContentRepository
             {
                 if (forceCql)
                 {
-                    var userResult = ContentQuery.Query(SafeQueries.UsersByLoginName, QuerySettings.AdminSettings, domainPath, name);
+                    var userResult = ContentQuery.QueryAsync(SafeQueries.UsersByLoginName, QuerySettings.AdminSettings,
+                        CancellationToken.None, domainPath, name).ConfigureAwait(false).GetAwaiter().GetResult();
                     
                     // non-unique user, do not allow login
                     if (userResult.Count > 1)
@@ -476,8 +604,8 @@ namespace SenseNet.ContentRepository
                 return null;
 
             // insert id into cache
-            if (DistributedApplication.Cache.Get(ck) == null)
-                DistributedApplication.Cache.Insert(ck, user.Id, CacheDependencyFactory.CreateNodeDependency(user));
+            if (Cache.Get(ck) == null)
+                Cache.Insert(ck, user.Id, CacheDependencyFactory.CreateNodeDependency(user));
 
             return user;
         }
@@ -549,7 +677,7 @@ namespace SenseNet.ContentRepository
             this.PasswordHash = PasswordHashProvider.EncodePassword(passwordInClearText, this);
 
             using (new SystemAccount())
-                Save(SavingMode.KeepVersion);
+                SaveAsync(SavingMode.KeepVersion, CancellationToken.None).GetAwaiter().GetResult();
 
             return true;
         }
@@ -652,16 +780,16 @@ namespace SenseNet.ContentRepository
                 {
                     var profilesTarget = Node.LoadNode(GetProfilesTargetPath());
                     var pc = Content.CreateNew(Profiles, profilesTarget, Profiles);
-                    pc.Save();
+                    pc.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
 
-                    var aclEditor = SecurityHandler.CreateAclEditor();
+                    var aclEditor = Providers.Instance.SecurityHandler.CreateAclEditor();
                     aclEditor.BreakInheritance(pc.Id, new[] {EntryType.Normal})
                         // ReSharper disable once CoVariantArrayConversion
                         .Allow(pc.Id, Identifiers.AdministratorsGroupId, false, PermissionType.PermissionTypes)
                         // ReSharper disable once CoVariantArrayConversion
                         .Allow(pc.Id, Identifiers.OwnersGroupId, false, PermissionType.PermissionTypes)
                         .Allow(pc.Id, Identifiers.EveryoneGroupId, true, PermissionType.Open)
-                        .Apply();
+                        .ApplyAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                     profiles = pc.ContentHandler;
                 }
@@ -687,7 +815,7 @@ namespace SenseNet.ContentRepository
 
                     try
                     {
-                        domain.Save();
+                        domain.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                         profileDomain = domain.ContentHandler;
                     }
                     catch (NodeAlreadyExistsException)
@@ -718,10 +846,17 @@ namespace SenseNet.ContentRepository
                         profile.ContentHandler.VersionCreatedBy = this;
                         profile.ContentHandler.Owner = this;
                         profile.DisplayName = this.Name;
-                        profile.Save();
+                        profile.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                         Profile = profile.ContentHandler as UserProfile;
-                        Save(SavingMode.KeepVersion);
+                        SaveAsync(SavingMode.KeepVersion, CancellationToken.None).GetAwaiter().GetResult();
+
+                        // Give explicit permission for the user on the profile so that
+                        // they can access all content items there, not just the ones
+                        // they created and own.
+                        Providers.Instance.SecurityHandler.SecurityContext.CreateAclEditor()
+                            .Allow(profile.Id, this.Id, false, PermissionType.Open)
+                            .ApplyAsync(CancellationToken.None).GetAwaiter().GetResult();
                     }
                     catch (Exception ex)
                     {
@@ -756,7 +891,7 @@ namespace SenseNet.ContentRepository
                     return;
 
                 profile.Name = newName;
-                profile.Save(SavingMode.KeepVersion);
+                profile.SaveAsync(SavingMode.KeepVersion, CancellationToken.None).GetAwaiter().GetResult();
             }
         }
 
@@ -765,17 +900,17 @@ namespace SenseNet.ContentRepository
         /// <inheritdoc />
         public bool IsInGroup(IGroup group)
         {
-            return SecurityHandler.IsInGroup(this.Id, group.Id);
+            return Providers.Instance.SecurityHandler.IsInGroup(this.Id, group.Id);
         }
         /// <inheritdoc />
         public bool IsInOrganizationalUnit(IOrganizationalUnit orgUnit)
         {
-            return SecurityHandler.IsInGroup(this.Id, orgUnit.Id);
+            return Providers.Instance.SecurityHandler.IsInGroup(this.Id, orgUnit.Id);
         }
         /// <inheritdoc />
         public bool IsInContainer(ISecurityContainer container)
         {
-            return SecurityHandler.IsInGroup(this.Id, container.Id);
+            return Providers.Instance.SecurityHandler.IsInGroup(this.Id, container.Id);
         }
 
         private const string LASTLOGGEDOUT = "LastLoggedOut";
@@ -790,7 +925,7 @@ namespace SenseNet.ContentRepository
         /// <summary>
         /// This method is obsolete. Use IsInGroup() instead.
         /// </summary>
-        [Obsolete("Use IsInGroup instead.", false)]
+        [Obsolete("Use IsInGroup instead.", true)]
         public bool IsInRole(int securityGroupId)
         {
             return IsInGroup(securityGroupId);
@@ -798,7 +933,7 @@ namespace SenseNet.ContentRepository
         /// <inheritdoc />
         public bool IsInGroup(int securityGroupId)
         {
-            return SecurityHandler.IsInGroup(this.Id, securityGroupId);
+            return Providers.Instance.SecurityHandler.IsInGroup(this.Id, securityGroupId);
         }
 
         /// <inheritdoc />
@@ -818,25 +953,19 @@ namespace SenseNet.ContentRepository
         {
             get
             {
+                // MembershipExtenderRecursionGuard: this pattern helps to avoid infinity recursion.
                 if (_membershipExtension == null || _membershipExtension == MembershipExtension.Placeholder)
                 {
                     var called = GetCachedData(MembershipExtensionCallingKey) != null;
                     if (called)
-                    {
-                        SnTrace.Security.Write("MembershipExtenderRecursionGuard: recursion skipped. Path: {0}", Path);
                         return MembershipExtension.Placeholder;
-                    }
 
-                    using (var op = SnTrace.Security.StartOperation("MembershipExtenderRecursionGuard activation. Path: {0}", Path))
-                    {
-                        SetCachedData(MembershipExtensionCallingKey, true);
+                    SetCachedData(MembershipExtensionCallingKey, true);
 
-                        // this method calls the setter of this property, filling the member variable
-                        MembershipExtenderBase.Extend(this);
+                    // this method calls the setter of this property, filling the member variable
+                    MembershipExtenderBase.Extend(this);
 
-                        SetCachedData(MembershipExtensionCallingKey, null);
-                        op.Successful = true;
-                    }
+                    SetCachedData(MembershipExtensionCallingKey, null);
                 }
 
                 return _membershipExtension;
@@ -855,7 +984,7 @@ namespace SenseNet.ContentRepository
         /// <summary>
         /// This method is obsolete. Use GetGroups() instead.
         /// </summary>
-        [Obsolete("Use GetGroups() instead.", false)]
+        [Obsolete("Use GetGroups() instead.", true)]
         public List<int> GetRoles()
         {
             return GetGroups();
@@ -866,7 +995,7 @@ namespace SenseNet.ContentRepository
         /// </summary>
         public List<int> GetGroups()
         {
-            return SecurityHandler.GetGroups(this);
+            return Providers.Instance.SecurityHandler.GetGroups(this);
         }
 
         // =================================================================================== IIdentity Members
@@ -911,13 +1040,22 @@ namespace SenseNet.ContentRepository
 
         }
 
-        /// <inheritdoc />
-        /// <remarks>Synchronizes the AD modifications via the current <see cref="DirectoryProvider"/>.</remarks>
+        [Obsolete("Use async version instead.", true)]
         public override void Save(NodeSaveSettings settings)
         {
+            SaveAsync(settings, CancellationToken.None).GetAwaiter().GetResult();
+        }
+        public override async System.Threading.Tasks.Task SaveAsync(NodeSaveSettings settings, CancellationToken cancel)
+        {
+            if (_inactivating)
+            {
+                await AccessTokenVault.DeleteTokensByUserAsync(this.Id, cancel).ConfigureAwait(false);
+                _inactivating = false;
+            }
+
             // Check uniqueness first
             if (Id == 0 || PropertyNamesForCheckUniqueness.Any(p => IsPropertyChanged(p)))
-                CheckUniqueUser();
+                await CheckUniqueUserAsync(cancel).ConfigureAwait(false);
 
             if (_password != null)
             {
@@ -932,28 +1070,35 @@ namespace SenseNet.ContentRepository
             // save current password to the list of old passwords
             this.SaveCurrentPassword();
 
-            base.Save(settings);
+            await base.SaveAsync(settings, cancel).ConfigureAwait(false);
 
             // AD Sync
             SynchUser(originalId);
 
             if (originalId == 0)
             {
-                // set creator for performant self permission setting
-                // creator of the user will always be the user itself. this way setting permissions to the creators group on /Root/IMS will be adequate for user permissions
-                // if you need the original creator, use the auditlog
-                Retrier.Retry(3, 200, typeof(Exception), () =>
+                // Set the creator and owner for convenient self permission setting.
+                // The creator and owner of the user will always be the user itself. This way
+                // setting permissions for the Owners group on /Root/IMS will be adequate
+                // for user permissions.
+                // If you need to know who the original creator is, use the audit log.
+                // This is happening inside an elevated block, because the creator user may not have
+                // the TakeOwnership permission which is required for this operation.
+                using (new SystemAccount())
                 {
-                    // need to clear this flag to avoid getting an 'Id <> 0' error during copying
-                    this.CopyInProgress = false;
-                    this.CreatedBy = this;
-                    this.Owner = this;
-                    this.VersionCreatedBy = this;
-                    this.DisableObserver(TypeResolver.GetType(NodeObserverNames.NOTIFICATION, false));
-                    this.DisableObserver(TypeResolver.GetType(NodeObserverNames.WORKFLOWNOTIFICATION, false));
+                    Retrier.Retry(3, 200, typeof(Exception), () =>
+                    {
+                        // need to clear this flag to avoid getting an 'Id <> 0' error during copying
+                        this.CopyInProgress = false;
+                        this.CreatedBy = this;
+                        this.Owner = this;
+                        this.VersionCreatedBy = this;
+                        this.DisableObserver(TypeResolver.GetType(NodeObserverNames.NOTIFICATION, false));
+                        this.DisableObserver(TypeResolver.GetType(NodeObserverNames.WORKFLOWNOTIFICATION, false));
 
-                    base.Save(SavingMode.KeepVersion);
-                });
+                        base.SaveAsync(SavingMode.KeepVersion, cancel).GetAwaiter().GetResult();
+                    });
+                }
 
                 // create profile
                 if (IdentityManagement.UserProfilesEnabled)
@@ -985,7 +1130,7 @@ namespace SenseNet.ContentRepository
             _syncObject = true;
         }
 
-        private void CheckUniqueUser()
+        private async System.Threading.Tasks.Task CheckUniqueUserAsync(CancellationToken cancel)
         {
             var path = Path;
 
@@ -1005,17 +1150,16 @@ namespace SenseNet.ContentRepository
 
             List<int> identifiers;
 
-            if (SearchManager.ContentQueryIsAllowed)
+            if (Providers.Instance.SearchManager.ContentQueryIsAllowed)
             {
                 // We need to look for other users in elevated mode, because the current 
                 // user may not have enough permissions for the whole user tree.
                 using (new SystemAccount())
                 {
-                    var queryResult = ContentQuery.Query(SafeQueries.UserOrGroupByLoginName,
-                        new QuerySettings {EnableAutofilters = FilterStatus.Disabled, Top = 2},
-                        domainPath.TrimEnd('/'), 
-                        Name,
-                        LoginName ?? Name);
+                    var queryResult = await ContentQuery.QueryAsync(SafeQueries.UserOrGroupByLoginName,
+                            new QuerySettings {EnableAutofilters = FilterStatus.Disabled, Top = 2},
+                            cancel, domainPath.TrimEnd('/'), Name, LoginName ?? Name)
+                        .ConfigureAwait(false);
 
                     identifiers = queryResult.Identifiers.ToList();
                 }
@@ -1024,8 +1168,8 @@ namespace SenseNet.ContentRepository
             {
                 identifiers = new List<int>();
 
-                var userType = ActiveSchema.NodeTypes["User"];
-                var groupType = ActiveSchema.NodeTypes["Group"];
+                var userType = Providers.Instance.StorageSchema.NodeTypes["User"];
+                var groupType = Providers.Instance.StorageSchema.NodeTypes["Group"];
 
                 // For backward compatibility reasons we have to execute up to 4 different 
                 // SQL queries to make sure that the user is unique under a domain.
@@ -1081,9 +1225,16 @@ namespace SenseNet.ContentRepository
 
         /// <inheritdoc />
         /// <remarks>Synchronizes the removed object via the current <see cref="DirectoryProvider"/>.</remarks>
+        [Obsolete("Use async version instead", true)]
         public override void ForceDelete()
         {
-            base.ForceDelete();
+            ForceDeleteAsync(CancellationToken.None).ConfigureAwait(false).GetAwaiter().GetResult();
+        }
+        /// <inheritdoc />
+        /// <remarks>Synchronizes the removed object via the current <see cref="DirectoryProvider"/>.</remarks>
+        public override async System.Threading.Tasks.Task ForceDeleteAsync(CancellationToken cancel)
+        {
+            await base.ForceDeleteAsync(cancel);
 
             // AD Sync
             var ADProvider = DirectoryProvider.Current;
@@ -1130,6 +1281,14 @@ namespace SenseNet.ContentRepository
         }
 
         // =================================================================================== Events
+        
+        protected override void OnDeletingPhysically(object sender, CancellableNodeEventArgs e)
+        {
+            base.OnDeletingPhysically(sender, e);
+
+            // check if all protected groups of this user remain functional
+            AssertEnabledParentGroupMembers();
+        }
 
         /// <summary>
         /// Checks whether the Move operation is acceptable for the current <see cref="DirectoryProvider"/>.
@@ -1152,6 +1311,32 @@ namespace SenseNet.ContentRepository
             }
 
             base.OnMoving(sender, e);
+        }
+
+        protected override void OnModifying(object sender, CancellableNodeEventArgs e)
+        {
+            base.OnModifying(sender, e);
+
+            // has the MultiFactorEnabled field changed?
+            var multiFactorEnabled = e.ChangedData.FirstOrDefault(cd => cd.Name == nameof(MultiFactorEnabled));
+            if (multiFactorEnabled != null && !string.IsNullOrEmpty((string)multiFactorEnabled.Value))
+            {
+                // reset values in both cases (on or off)
+                ResetTwoFactorKeyAsync(CancellationToken.None).GetAwaiter().GetResult();
+            }
+            
+            // has the Enabled field changed to False?
+            var changedEnabled = e.ChangedData.FirstOrDefault(cd => cd.Name == nameof(Enabled));
+            if (changedEnabled == null || string.IsNullOrEmpty((string)changedEnabled.Value) || 
+                int.Parse((string)changedEnabled.Value) == 1)
+                return;
+
+            // check if the user tried to disable themselves
+            if (Id == AccessProvider.Current.GetOriginalUser().Id)
+                throw new InvalidOperationException("It is not possible to disable the current user.");
+
+            // check if all protected groups of this user remain functional
+            AssertEnabledParentGroupMembers();
         }
 
         /// <summary>
@@ -1179,7 +1364,59 @@ namespace SenseNet.ContentRepository
             {
                 var parent = GroupMembershipObserver.GetFirstOrgUnitParent(e.SourceNode);
                 if (parent != null)
-                    SecurityHandler.AddUsersToGroup(parent.Id, new[] { e.SourceNode.Id });
+                    Providers.Instance.SecurityHandler.AddUsersToGroupAsync(parent.Id, new[] { e.SourceNode.Id },
+                        CancellationToken.None).GetAwaiter().GetResult();
+            }
+        }
+
+        private static readonly string[] InternalUserPaths =
+        {
+            Identifiers.PublicAdminPath
+        };
+
+        /// <summary>
+        /// Determines if the provided node is a regular (not internal) user and it is enabled. 
+        /// </summary>
+        internal static bool IsEnabledRegularUser(Node user)
+        {
+            return user is User usr && usr.Enabled && !InternalUserPaths.Contains(usr.Path);
+        }
+
+        private void AssertEnabledParentGroupMembers()
+        {
+            AssertEnabledParentGroupMembers(Id);
+        }
+        /// <summary>
+        /// This method checks all direct parent groups of the specified users.
+        /// If any of them would remain empty after removing or disabling the provided
+        /// users, this method throws an <see cref="InvalidOperationException"/>.
+        /// </summary>
+        internal static void AssertEnabledParentGroupMembers(params int[] userIds)
+        {
+            // Check if all protected groups of this user remain functional. This means that
+            // a group must contain at least one non-internal enabled user.
+            // Internal users are skipped because clients cannot use them to log in.
+
+            using (new SystemAccount())
+            {
+                var protectedGroupIds = Providers.Instance.ContentProtector.GetProtectedGroupIds();
+                var sc = Providers.Instance.SecurityHandler.SecurityContext;
+
+                // Load all direct parent groups. We do not have to go up on the parent
+                // chain because protected groups must have enabled direct members.
+                var groupsToCheck = userIds.Select(uid =>
+                        sc.GetParentGroups(uid, true)
+                            .Where(pg => protectedGroupIds.Contains(pg)))
+                    .SelectMany(g => g).Distinct().ToArray();
+
+                foreach (var group in LoadNodes(groupsToCheck).Where(g => g != null).Cast<Group>())
+                {
+                    // true if no other enabled regular member would remain in the group
+                    if (!group.GetMemberUsers().Any(mu => 
+                        !userIds.Contains(mu.Id) && IsEnabledRegularUser(mu as User)))
+                        throw new InvalidOperationException("It is not possible to perform this operation. " +
+                              $"It would leave the {group.Name} protected group without an enabled member.");
+                }
             }
         }
 
@@ -1198,8 +1435,28 @@ namespace SenseNet.ContentRepository
             // update object without syncing to AD
             _syncObject = false;
 
-            this.Save();
+            this.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
         }
+
+        // =================================================================================== Multifactor authentication
+
+        public async System.Threading.Tasks.Task ResetTwoFactorKeyAsync(CancellationToken cancel)
+        {
+            var twoFactorToken = TwoFactorKey;
+
+            // delete the existing key
+            await AccessTokenVault.DeleteTokenAsync(twoFactorToken, cancel).ConfigureAwait(false);
+
+            MultiFactorRegistered = false;
+
+            // clear cache
+            SetCachedData(nameof(TwoFactorKey), null);
+            SetCachedData(nameof(QrCodeSetupImageUrl), null);
+            SetCachedData(nameof(ManualEntryKey), null);
+        }
+        
+        //TODO: handle user-specific account changes
+        private string GetTwoFactorAccountName() => Email ?? LoginName;
 
         // =================================================================================== Generic Property handlers
 
@@ -1230,6 +1487,10 @@ namespace SenseNet.ContentRepository
                     return this.ProfilePath;
                 case LASTLOGGEDOUT:
                     return this.LastLoggedOut;
+                case nameof(MultiFactorEnabled):
+                    return this.MultiFactorEnabled;
+                case nameof(MultiFactorRegistered):
+                    return this.MultiFactorRegistered;
                 default:
                     return base.GetProperty(name);
             }
@@ -1271,6 +1532,12 @@ namespace SenseNet.ContentRepository
                     break;
                 case LASTLOGGEDOUT:
                     this.LastLoggedOut = (DateTime)value;
+                    break;
+                case nameof(MultiFactorEnabled):
+                    this.MultiFactorEnabled = (bool) value;
+                    break;
+                case nameof(MultiFactorRegistered):
+                    this.MultiFactorRegistered = (bool)value;
                     break;
                 default:
                     base.SetProperty(name, value);

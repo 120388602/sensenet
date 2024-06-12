@@ -2,6 +2,10 @@
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using FluentAssertions;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using SenseNet.Configuration;
 using SenseNet.ContentRepository.Search;
@@ -9,14 +13,22 @@ using SenseNet.ContentRepository.Search.Indexing;
 using SenseNet.ContentRepository.Security;
 using SenseNet.ContentRepository.Storage;
 using SenseNet.ContentRepository.Storage.Data;
-using SenseNet.ContentRepository.Storage.Data.SqlClient;
+using SenseNet.ContentRepository.Storage.Data.MsSqlClient;
 using SenseNet.ContentRepository.Storage.Events;
 using SenseNet.ContentRepository.Storage.Security;
+using SenseNet.ContentRepository.InMemory;
+using SenseNet.ContentRepository.Schema;
 using SenseNet.Diagnostics;
+using SenseNet.Extensions.DependencyInjection;
 using SenseNet.Search;
+using SenseNet.Search.Indexing;
+using SenseNet.Security;
 using SenseNet.Security.Data;
-using SenseNet.Tests;
-using SenseNet.Tests.Implementations;
+using SenseNet.Security.Messaging;
+using SenseNet.Storage.Diagnostics;
+using SenseNet.Tests.Core;
+using SenseNet.Tools;
+using SenseNet.Tools.Diagnostics;
 
 namespace SenseNet.ContentRepository.Tests
 {
@@ -48,188 +60,111 @@ namespace SenseNet.ContentRepository.Tests
             }
         }
 
-        private class TestPackagingDataProvider : IPackagingDataProviderExtension
+        private class TestAccessTokenDataProvider : IAccessTokenDataProvider
         {
-            public DataProvider MainProvider { get; set; }
-            public IEnumerable<ComponentInfo> LoadInstalledComponents()
+            public System.Threading.Tasks.Task DeleteAllAccessTokensAsync(CancellationToken cancellationToken)
             {
                 throw new NotImplementedException();
             }
 
-            public IEnumerable<Package> LoadInstalledPackages()
+            public System.Threading.Tasks.Task SaveAccessTokenAsync(AccessToken token, CancellationToken cancellationToken)
             {
                 throw new NotImplementedException();
             }
 
-            public void SavePackage(Package package)
+            public Task<AccessToken> LoadAccessTokenByIdAsync(int accessTokenId, CancellationToken cancellationToken)
             {
                 throw new NotImplementedException();
             }
 
-            public void UpdatePackage(Package package)
+            public Task<AccessToken> LoadAccessTokenAsync(string tokenValue, int contentId, string feature,
+                CancellationToken cancellationToken)
             {
                 throw new NotImplementedException();
             }
 
-            public bool IsPackageExist(string componentId, PackageType packageType, Version version)
+            public Task<AccessToken[]> LoadAccessTokensAsync(int userId, CancellationToken cancellationToken)
             {
                 throw new NotImplementedException();
             }
 
-            public void DeletePackage(Package package)
+            public System.Threading.Tasks.Task UpdateAccessTokenAsync(string tokenValue, DateTime newExpirationDate,
+                CancellationToken cancellationToken)
             {
                 throw new NotImplementedException();
             }
 
-            public void DeleteAllPackages()
+            public System.Threading.Tasks.Task DeleteAccessTokenAsync(string tokenValue, CancellationToken cancellationToken)
             {
                 throw new NotImplementedException();
             }
 
-            public void LoadManifest(Package package)
+            public System.Threading.Tasks.Task DeleteAccessTokensByUserAsync(int userId, CancellationToken cancellationToken)
+            {
+                throw new NotImplementedException();
+            }
+
+            public System.Threading.Tasks.Task DeleteAccessTokensByContentAsync(int contentId, CancellationToken cancellationToken)
+            {
+                throw new NotImplementedException();
+            }
+
+            public System.Threading.Tasks.Task DeleteAccessTokensAsync(int userId, int contentId, string feature, CancellationToken cancellationToken)
+            {
+                throw new NotImplementedException();
+            }
+
+            public System.Threading.Tasks.Task CleanupAccessTokensAsync(CancellationToken cancellationToken)
             {
                 throw new NotImplementedException();
             }
         }
-        private class TestAccessTokenDataProvider : IAccessTokenDataProviderExtension
+        private class TestAuditEventWriter : IAuditEventWriter
         {
-            public DataProvider MainProvider { get; set; }
-            public void DeleteAllAccessTokens()
+            public void Write(IAuditEvent auditEvent, IDictionary<string, object> properties)
             {
-                throw new NotImplementedException();
-            }
-
-            public void SaveAccessToken(AccessToken token)
-            {
-                throw new NotImplementedException();
-            }
-
-            public AccessToken LoadAccessTokenById(int accessTokenId)
-            {
-                throw new NotImplementedException();
-            }
-
-            public AccessToken LoadAccessToken(string tokenValue, int contentId, string feature)
-            {
-                throw new NotImplementedException();
-            }
-
-            public AccessToken[] LoadAccessTokens(int userId)
-            {
-                throw new NotImplementedException();
-            }
-
-            public void UpdateAccessToken(string tokenValue, DateTime newExpirationDate)
-            {
-                throw new NotImplementedException();
-            }
-
-            public void DeleteAccessToken(string tokenValue)
-            {
-                throw new NotImplementedException();
-            }
-
-            public void DeleteAccessTokensByUser(int userId)
-            {
-                throw new NotImplementedException();
-            }
-
-            public void DeleteAccessTokensByContent(int contentId)
-            {
-                throw new NotImplementedException();
             }
         }
+
         #endregion
 
-        [TestMethod]
-        public void RepositoryStart_NamedProviders()
+        private IRepositoryBuilder CreateRepositoryBuilder(AccessProvider accessProvider = null, ISearchEngine searchEngine = null)
         {
-            var dbProvider = new InMemoryDataProvider();
-            var securityDbProvider = new MemoryDataProvider(DatabaseStorage.CreateEmpty());
-            var searchEngine = new InMemorySearchEngine();
-            var accessProvider = new DesktopAccessProvider();
-            var emvrProvider = new ElevatedModificationVisibilityRule();
+            var services = CreateServiceProviderForTest();
+            Providers.Instance = new Providers(services);
 
-            // switch this ON here for testing purposes (to check that repo start does not override it)
-            SnTrace.Custom.Enabled = true;
-
-            var repoBuilder = new RepositoryBuilder()
-                .UseDataProvider(dbProvider)
+            var dbProvider = services.GetRequiredService<DataProvider>();
+            return new RepositoryBuilder(services)
+                .UseAccessProvider(accessProvider ?? new DesktopAccessProvider())
+                .UseInitialData(GetInitialData())
                 .UseBlobMetaDataProvider(new InMemoryBlobStorageMetaDataProvider(dbProvider))
                 .UseBlobProviderSelector(new InMemoryBlobProviderSelector())
-                .UseSecurityDataProvider(securityDbProvider)
-                .UseSearchEngine(searchEngine)
-                .UseAccessProvider(accessProvider)
-                .UseElevatedModificationVisibilityRuleProvider(emvrProvider)
+                .AddBlobProvider(new InMemoryBlobProvider())
+                .UseSearchEngine(searchEngine ?? services.GetRequiredService<ISearchEngine>())
                 .StartIndexingEngine(false)
                 .StartWorkflowEngine(false)
                 .UseTraceCategories("Test", "Web", "System");
-
-            using (Repository.Start(repoBuilder))
-            {
-                Assert.AreEqual(dbProvider, DataProvider.Current);
-                Assert.AreEqual(searchEngine, SearchManager.SearchEngine);
-                Assert.AreEqual(accessProvider, AccessProvider.Current);
-                Assert.AreEqual(emvrProvider, Providers.Instance.ElevatedModificationVisibilityRuleProvider);
-
-                // Currently this does not work, because the property below re-creates the security 
-                // db provider from the prototype, so it cannot be ref equal with the original.
-                // Assert.AreEqual(securityDbProvider, SecurityHandler.SecurityContext.DataProvider);
-                Assert.AreEqual(securityDbProvider, Providers.Instance.SecurityDataProvider);
-
-                // Check a few trace categories that were switched ON above.
-                Assert.IsTrue(SnTrace.Custom.Enabled);
-                Assert.IsTrue(SnTrace.Test.Enabled);
-                Assert.IsTrue(SnTrace.Web.Enabled);
-                Assert.IsTrue(SnTrace.System.Enabled);
-                Assert.IsFalse(SnTrace.TaskManagement.Enabled);
-                Assert.IsFalse(SnTrace.Workflow.Enabled);
-            }
         }
 
         [TestMethod]
         public void RepositoryStart_NodeObservers_DisableAll()
         {
-            var dbProvider = new InMemoryDataProvider();
-
-            var repoBuilder = new RepositoryBuilder()
-                .UseDataProvider(dbProvider)
-                .UseBlobMetaDataProvider(new InMemoryBlobStorageMetaDataProvider(dbProvider))
-                .UseBlobProviderSelector(new InMemoryBlobProviderSelector())
-                .UseSecurityDataProvider(new MemoryDataProvider(DatabaseStorage.CreateEmpty()))
-                .UseSearchEngine(new InMemorySearchEngine())
-                .UseAccessProvider(new DesktopAccessProvider())
-                .UseElevatedModificationVisibilityRuleProvider(new ElevatedModificationVisibilityRule())
-                .UseCacheProvider(new EmptyCache())
-                .DisableNodeObservers()
-                .StartIndexingEngine(false)
-                .StartWorkflowEngine(false)
-                .UseTraceCategories("Test", "Web", "System");
+            var repoBuilder = CreateRepositoryBuilder()
+                .DisableNodeObservers();
 
             using (Repository.Start(repoBuilder))
             {
                 Assert.IsFalse(Providers.Instance.NodeObservers.Any());
             }
         }
+
         [TestMethod]
         public void RepositoryStart_NodeObservers_EnableOne()
         {
-            var dbProvider = new InMemoryDataProvider();
-
-            var repoBuilder = new RepositoryBuilder()
-                .UseDataProvider(dbProvider)
-                .UseBlobMetaDataProvider(new InMemoryBlobStorageMetaDataProvider(dbProvider))
-                .UseBlobProviderSelector(new InMemoryBlobProviderSelector())
-                .UseSecurityDataProvider(new MemoryDataProvider(DatabaseStorage.CreateEmpty()))
-                .UseSearchEngine(new InMemorySearchEngine())
-                .UseAccessProvider(new DesktopAccessProvider())
-                .UseElevatedModificationVisibilityRuleProvider(new ElevatedModificationVisibilityRule())
-                .UseCacheProvider(new EmptyCache())
+            var repoBuilder = CreateRepositoryBuilder()
                 .DisableNodeObservers()
-                .EnableNodeObservers(typeof(TestNodeObserver1))
-                .StartIndexingEngine(false)
-                .StartWorkflowEngine(false)
-                .UseTraceCategories("Test", "Web", "System");
+                .EnableNodeObservers(typeof(TestNodeObserver1));
+
 
             using (Repository.Start(repoBuilder))
             {
@@ -237,25 +172,13 @@ namespace SenseNet.ContentRepository.Tests
                 Assert.AreEqual(typeof(TestNodeObserver1), Providers.Instance.NodeObservers[0].GetType());
             }
         }
+
         [TestMethod]
         public void RepositoryStart_NodeObservers_EnableMore()
         {
-            var dbProvider = new InMemoryDataProvider();
-
-            var repoBuilder = new RepositoryBuilder()
-                .UseDataProvider(dbProvider)
-                .UseBlobMetaDataProvider(new InMemoryBlobStorageMetaDataProvider(dbProvider))
-                .UseBlobProviderSelector(new InMemoryBlobProviderSelector())
-                .UseSecurityDataProvider(new MemoryDataProvider(DatabaseStorage.CreateEmpty()))
-                .UseSearchEngine(new InMemorySearchEngine())
-                .UseAccessProvider(new DesktopAccessProvider())
-                .UseElevatedModificationVisibilityRuleProvider(new ElevatedModificationVisibilityRule())
-                .UseCacheProvider(new EmptyCache())
+            var repoBuilder = CreateRepositoryBuilder()
                 .DisableNodeObservers()
-                .EnableNodeObservers(typeof(TestNodeObserver1), typeof(TestNodeObserver2))
-                .StartIndexingEngine(false)
-                .StartWorkflowEngine(false)
-                .UseTraceCategories("Test", "Web", "System");
+                .EnableNodeObservers(typeof(TestNodeObserver1), typeof(TestNodeObserver2));
 
             using (Repository.Start(repoBuilder))
             {
@@ -264,24 +187,12 @@ namespace SenseNet.ContentRepository.Tests
                 Assert.IsTrue(Providers.Instance.NodeObservers.Any(no => no.GetType() == typeof(TestNodeObserver2)));
             }
         }
+
         [TestMethod]
         public void RepositoryStart_NodeObservers_DisableOne()
         {
-            var dbProvider = new InMemoryDataProvider();
-
-            var repoBuilder = new RepositoryBuilder()
-                .UseDataProvider(dbProvider)
-                .UseBlobMetaDataProvider(new InMemoryBlobStorageMetaDataProvider(dbProvider))
-                .UseBlobProviderSelector(new InMemoryBlobProviderSelector())
-                .UseSecurityDataProvider(new MemoryDataProvider(DatabaseStorage.CreateEmpty()))
-                .UseSearchEngine(new InMemorySearchEngine())
-                .UseAccessProvider(new DesktopAccessProvider())
-                .UseElevatedModificationVisibilityRuleProvider(new ElevatedModificationVisibilityRule())
-                .UseCacheProvider(new EmptyCache())
-                .DisableNodeObservers(typeof(TestNodeObserver1))
-                .StartIndexingEngine(false)
-                .StartWorkflowEngine(false)
-                .UseTraceCategories("Test", "Web", "System");
+            var repoBuilder = CreateRepositoryBuilder()
+                .DisableNodeObservers(typeof(TestNodeObserver1));
 
             using (Repository.Start(repoBuilder))
             {
@@ -296,23 +207,7 @@ namespace SenseNet.ContentRepository.Tests
         [TestMethod]
         public void RepositoryStart_NullPopulator()
         {
-            var dbProvider = new InMemoryDataProvider();
-            var securityDbProvider = new MemoryDataProvider(DatabaseStorage.CreateEmpty());
-            var searchEngine = new InMemorySearchEngine();
-            var accessProvider = new DesktopAccessProvider();
-            var emvrProvider = new ElevatedModificationVisibilityRule();
-
-            var repoBuilder = new RepositoryBuilder()
-                .UseDataProvider(dbProvider)
-                .UseBlobMetaDataProvider(new InMemoryBlobStorageMetaDataProvider(dbProvider))
-                .UseBlobProviderSelector(new InMemoryBlobProviderSelector())
-                .UseSecurityDataProvider(securityDbProvider)
-                .UseSearchEngine(searchEngine)
-                .UseAccessProvider(accessProvider)
-                .UseElevatedModificationVisibilityRuleProvider(emvrProvider)
-                .StartIndexingEngine(false)
-                .StartWorkflowEngine(false)
-                .UseTraceCategories("Test", "Web", "System");
+            var repoBuilder = CreateRepositoryBuilder();
 
             var originalIsOuterSearchEngineEnabled = Indexing.IsOuterSearchEngineEnabled;
             Indexing.IsOuterSearchEngineEnabled = false;
@@ -320,9 +215,10 @@ namespace SenseNet.ContentRepository.Tests
             {
                 using (Repository.Start(repoBuilder))
                 {
-                    Assert.IsFalse(SearchManager.IsOuterEngineEnabled);
-                    Assert.AreEqual(typeof(InternalSearchEngine), SearchManager.SearchEngine.GetType());
-                    var populator = SearchManager.GetIndexPopulator();
+                    Assert.IsFalse(Providers.Instance.SearchManager.IsOuterEngineEnabled);
+                    Assert.AreEqual(typeof(InternalSearchEngine),
+                        Providers.Instance.SearchManager.SearchEngine.GetType());
+                    var populator = Providers.Instance.SearchManager.GetIndexPopulator();
                     Assert.AreEqual(typeof(NullPopulator), populator.GetType());
                 }
             }
@@ -336,20 +232,24 @@ namespace SenseNet.ContentRepository.Tests
         public void RepositoryStart_Loggers()
         {
             var originalLogger = SnLog.Instance;
-            var originalTracers = SnTrace.SnTracers;
+            var originalTracers = SnTrace.SnTracers.ToArray();
 
             try
             {
-                Test(repoBuilder =>
+                SnTrace.SnTracers.Clear();
+
+                Test2(services =>
+                    {
+                        services.AddSenseNetTracer<TestSnTracer>();
+                    },
+                    repoBuilder =>
                 {
                     repoBuilder
-                        .UseLogger(new TestEventLogger())
-                        .UseTracer(new TestSnTracer());
+                        .UseLogger(new TestEventLogger());
                 }, () =>
                 {
                     //test that the loggers were set correctly
-                    Assert.AreEqual(1, SnTrace.SnTracers.Count);
-                    Assert.IsTrue(SnTrace.SnTracers.First() is TestSnTracer);
+                    Assert.IsNotNull(SnTrace.SnTracers.Single(snt => snt is TestSnTracer));
                     Assert.IsTrue(SnLog.Instance is TestEventLogger);
                 });
             }
@@ -362,67 +262,87 @@ namespace SenseNet.ContentRepository.Tests
         }
 
         [TestMethod]
-        public void RepositoryStart_DataProviderExtensions_Default()
+        public void RepositoryStart_AuditEventWriter()
         {
-            var dbProvider = new InMemoryDataProvider();
-            var securityDbProvider = new MemoryDataProvider(DatabaseStorage.CreateEmpty());
-            var searchEngine = new InMemorySearchEngine();
-            var accessProvider = new DesktopAccessProvider();
-            var emvrProvider = new ElevatedModificationVisibilityRule();
-
-            // switch this ON here for testing purposes (to check that repo start does not override it)
-            SnTrace.Custom.Enabled = true;
-
-            var repoBuilder = new RepositoryBuilder()
-                .UseDataProvider(dbProvider)
-                .UseBlobMetaDataProvider(new InMemoryBlobStorageMetaDataProvider(dbProvider))
-                .UseBlobProviderSelector(new InMemoryBlobProviderSelector())
-                .UseSecurityDataProvider(securityDbProvider)
-                .UseSearchEngine(searchEngine)
-                .UseAccessProvider(accessProvider)
-                .UseElevatedModificationVisibilityRuleProvider(emvrProvider)
-                .StartIndexingEngine(false)
-                .StartWorkflowEngine(false)
-                .UseTraceCategories("Test", "Web", "System");
-
-            using (Repository.Start(repoBuilder))
+            var originalWriter = SnLog.AuditEventWriter;
+            try
             {
-                Assert.AreEqual(typeof(SqlPackagingDataProvider), DataProvider.GetExtension<IPackagingDataProviderExtension>().GetType());
-                Assert.AreEqual(typeof(SqlAccessTokenDataProvider), DataProvider.GetExtension<IAccessTokenDataProviderExtension>().GetType());
+                Test2(services =>
+                {
+                    services.AddAuditEventWriter<TestAuditEventWriter>();
+                }, () =>
+                {
+                    Assert.IsNotNull(Providers.Instance.AuditEventWriter);
+                    Assert.AreSame(Providers.Instance.AuditEventWriter, SnLog.AuditEventWriter);
+                });
+            }
+            finally
+            {
+                SnLog.AuditEventWriter = originalWriter;
             }
         }
 
         [TestMethod]
         public void RepositoryStart_DataProviderExtensions_OverrideDefault()
         {
-            var dbProvider = new InMemoryDataProvider();
-            var securityDbProvider = new MemoryDataProvider(DatabaseStorage.CreateEmpty());
-            var searchEngine = new InMemorySearchEngine();
-            var accessProvider = new DesktopAccessProvider();
-            var emvrProvider = new ElevatedModificationVisibilityRule();
-
             // switch this ON here for testing purposes (to check that repo start does not override it)
             SnTrace.Custom.Enabled = true;
 
-            var repoBuilder = new RepositoryBuilder()
-                .UseDataProvider(dbProvider)
-                .UseBlobMetaDataProvider(new InMemoryBlobStorageMetaDataProvider(dbProvider))
-                .UseBlobProviderSelector(new InMemoryBlobProviderSelector())
-                .UsePackagingDataProviderExtension(new TestPackagingDataProvider())         // ACTION: set test provider
-                .UseAccessTokenDataProviderExtension(new TestAccessTokenDataProvider())     // ACTION: set test provider
-                .UseSecurityDataProvider(securityDbProvider)
-                .UseSearchEngine(searchEngine)
-                .UseAccessProvider(accessProvider)
-                .UseElevatedModificationVisibilityRuleProvider(emvrProvider)
-                .StartIndexingEngine(false)
-                .StartWorkflowEngine(false)
-                .UseTraceCategories("Test", "Web", "System");
-
-            using (Repository.Start(repoBuilder))
+            Test(() =>
             {
-                Assert.AreEqual(typeof(TestPackagingDataProvider), DataProvider.GetExtension<IPackagingDataProviderExtension>().GetType());
-                Assert.AreEqual(typeof(TestAccessTokenDataProvider), DataProvider.GetExtension<IAccessTokenDataProviderExtension>().GetType());
+                Assert.IsInstanceOfType(Providers.Instance.Services.GetRequiredService<IAccessTokenDataProvider>(),
+                    typeof(InMemoryAccessTokenDataProvider));
+            });
+
+            Test2(services =>
+            {
+                services.AddSingleton<IAccessTokenDataProvider, TestAccessTokenDataProvider>();
+            }, () =>
+            {
+                Assert.IsInstanceOfType(Providers.Instance.Services.GetRequiredService<IAccessTokenDataProvider>(),
+                    typeof(TestAccessTokenDataProvider));
+            });
+        }
+
+        [TestMethod]
+        public void RepositoryStart_IndexAnalyzers()
+        {
+            var searchEngineImpl = new InMemorySearchEngine(GetInitialIndex());
+
+            Test(repoBuilder =>
+            {
+                repoBuilder.UseSearchEngine(searchEngineImpl);
+            }, () =>
+            {
+                var searchEngine = Providers.Instance.SearchEngine;
+
+                Assert.AreSame(searchEngineImpl, searchEngine);
+
+                var expectedAnalyzers = GetAnalyzers(ContentTypeManager.Instance.IndexingInfo);
+                var analyzers = searchEngine.GetAnalyzers();
+                analyzers.Should().Equal(expectedAnalyzers);
+
+                // double check
+                ResetContentTypeManager();
+                ContentType.GetByName("GenericContent");
+                var analyzers2 = searchEngine.GetAnalyzers();
+                analyzers2.Should().Equal(expectedAnalyzers);
+
+            });
+        }
+        private Dictionary<string, IndexFieldAnalyzer> GetAnalyzers(IDictionary<string, IPerFieldIndexingInfo> indexingInfo)
+        {
+            var analyzerTypes = new Dictionary<string, IndexFieldAnalyzer>();
+
+            foreach (var item in indexingInfo)
+            {
+                var fieldName = item.Key;
+                var fieldInfo = item.Value;
+                if (fieldInfo.Analyzer != IndexFieldAnalyzer.Default)
+                    analyzerTypes.Add(fieldName, fieldInfo.Analyzer);
             }
+
+            return analyzerTypes;
         }
     }
 }

@@ -9,7 +9,8 @@ using SenseNet.Search.Querying.Parser;
 using SenseNet.Search.Querying.Parser.Predicates;
 using SenseNet.Search.Tests.Implementations;
 using SenseNet.Tests;
-using SenseNet.Tests.Implementations;
+using SenseNet.Tests.Core;
+using SenseNet.Tests.Core.Implementations;
 
 namespace SenseNet.Search.Tests
 {
@@ -100,6 +101,16 @@ namespace SenseNet.Search.Tests
             TestError("Name:\"aaa");
             TestError("");
             TestError(".TOP:10");
+        }
+        [TestMethod, TestCategory("IR")]
+        public void SnQuery_Parser_AstToString_StringDelimiters()
+        {
+            Test("Name:\"1abc'def\"", "Name:1abc'def");
+            Test("Name:\"2abc\'def\"", "Name:2abc'def");
+            Test("Name:\"3abc\\\"def\"", "Name:'3abc\"def'");
+            Test("Name:'4abc\"def'", "Name:'4abc\"def'");
+            Test("Name:'5abc\\'def'", "Name:5abc'def");
+            Test(@"Name:'5abc\'def'", "Name:5abc'def");
         }
         [TestMethod, TestCategory("IR")]
         public void SnQuery_Parser_AstToString_EmptyQueries()
@@ -426,8 +437,8 @@ namespace SenseNet.Search.Tests
                 Assert.IsTrue((!snQuery.Sort.Any() && expectedSortInfo[sortIndex] == null) || expectedSortInfo[sortIndex].Count() == snQuery.Sort.Length);
             }
         }
-        [TestMethod, TestCategory("IR")]
-        public void SnQuery_Parser_AggregateSettingsCountOnlyAllVersions()
+        [TestMethod, TestCategory("IR"), TestCategory("Services")]
+        public void SnQuery_Parser_AggregateSettingsCountOnlyAllVersions_CSrv()
         {
             var indexingInfo = new Dictionary<string, IPerFieldIndexingInfo>
             {

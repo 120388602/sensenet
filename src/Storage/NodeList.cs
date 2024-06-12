@@ -5,6 +5,7 @@ using System.Linq;
 using SenseNet.ContentRepository.Storage.Schema;
 using SenseNet.ContentRepository.Storage.Security;
 using System.Diagnostics;
+using SenseNet.Configuration;
 
 namespace SenseNet.ContentRepository.Storage
 {
@@ -305,7 +306,7 @@ namespace SenseNet.ContentRepository.Storage
 
             int count = 0;
             foreach (var head in new NodeHeadResolver(RawData))
-                if (SecurityHandler.HasPermission(head, PermissionType.See))
+                if (Providers.Instance.SecurityHandler.HasPermission(head, PermissionType.See))
                     count++;
             return count;
         }
@@ -379,6 +380,17 @@ namespace SenseNet.ContentRepository.Storage
             CheckId(item);
             Modifying();
             int index = RawData.IndexOf(item == null ? 0 : item.Id);
+            if (index < 0)
+                return false;
+            RawData.RemoveAt(index);
+            Modified();
+            return true;
+        }
+
+        internal bool Remove(int nodeId)
+        {
+            Modifying();
+            int index = RawData.IndexOf(nodeId);
             if (index < 0)
                 return false;
             RawData.RemoveAt(index);
@@ -548,7 +560,11 @@ namespace SenseNet.ContentRepository.Storage
         {
             if (RawData.Count < 1)
                 return null;
-            var singleNode = Node.Load<T>(RawData[0]);
+            Node singleNode;
+            using(new SystemAccount())
+                singleNode = Node.Load<T>(RawData[0]);
+            if(!singleNode.Security.HasPermission(AccessProvider.Current.GetCurrentUser(), PermissionType.See))
+                return null;
             return singleNode as Q;
         }
         internal void SetSingleValue<Q>(Q value) where Q : Node

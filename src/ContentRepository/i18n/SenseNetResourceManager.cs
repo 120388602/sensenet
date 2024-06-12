@@ -5,12 +5,18 @@ using System.Text.RegularExpressions;
 using SenseNet.ContentRepository.Storage.Security;
 using SenseNet.Diagnostics;
 using System.Collections.Generic;
+using System.Threading;
+using STT=System.Threading.Tasks;
 using System.Web;
 using SenseNet.ContentRepository.Storage.Search;
 using SenseNet.ContentRepository.Storage;
 using System.Xml;
 using SenseNet.Communication.Messaging;
 using SenseNet.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using SenseNet.ContentRepository.Search.Indexing;
+using EventId = SenseNet.Diagnostics.EventId;
 
 namespace SenseNet.ContentRepository.i18n
 {
@@ -47,31 +53,35 @@ namespace SenseNet.ContentRepository.i18n
         [Serializable]
         internal sealed class ResourceManagerResetDistributedAction : DistributedAction
         {
-            public override void DoAction(bool onRemote, bool isFromMe)
+            public override string TraceMessage => null;
+
+            public override STT.Task DoActionAsync(bool onRemote, bool isFromMe, CancellationToken cancellationToken)
             {
                 // Local echo of my action: Return without doing anything
                 if (onRemote && isFromMe)
-                    return;
+                    return STT.Task.CompletedTask;
                 SenseNetResourceManager.ResetPrivate();
+
+                return STT.Task.CompletedTask;
             }
         }
 
         internal static void Reset()
         {
-            SnLog.WriteInformation("ResourceManager.Reset called.", EventId.RepositoryRuntime,
-                properties: new Dictionary<string, object> { { "AppDomain", AppDomain.CurrentDomain.FriendlyName } });
+            SnTrace.Repository.Write("ResourceManager.Reset called.");
 
-            new ResourceManagerResetDistributedAction().Execute();
+            new ResourceManagerResetDistributedAction().ExecuteAsync(CancellationToken.None).GetAwaiter().GetResult();
         }
         private static void ResetPrivate()
         {
-            SnLog.WriteInformation("ResourceManager.Reset executed.", EventId.RepositoryRuntime,
-                properties: new Dictionary<string, object> { { "AppDomain", AppDomain.CurrentDomain.FriendlyName } });
+            SnTrace.Repository.Write("ResourceManager.Reset executed.");
 
             lock (_syncRoot)
             {
                 _current = null;
             }
+
+            ResourceManagerRestarted?.Invoke(null, EventArgs.Empty);
         }
 
         // ================================================================ Static part
@@ -99,7 +109,7 @@ namespace SenseNet.ContentRepository.i18n
                             var current = new SenseNetResourceManager();
                             current.Load();
                             _current = current;
-                            SnLog.WriteInformation("ResourceManager created: " + _current.GetType().FullName);
+                            _current._logger.LogInformation("ResourceManager created: " + _current.GetType().FullName);
                         }
                     }
                 }
@@ -111,12 +121,21 @@ namespace SenseNet.ContentRepository.i18n
         [Obsolete("After V6.5 PATCH 9: Use RepositoryEnvironment.FallbackCulture instead.")]
         public static string FallbackCulture => RepositoryEnvironment.FallbackCulture;
 
+        /// <summary>
+        /// Defines an event that occurs when the resource manager is restarted.
+        /// </summary>
+        public static event EventHandler ResourceManagerRestarted;
+
         public static bool Running
         {
             get { return _current != null; }
         }
 
-        private SenseNetResourceManager() { }
+        private ILogger<SenseNetResourceManager> _logger;
+        private SenseNetResourceManager()
+        {
+            _logger = Providers.Instance.Services.GetService<ILogger<SenseNetResourceManager>>();
+        }
 
         // ================================================================ Instance part
 
@@ -130,7 +149,7 @@ namespace SenseNet.ContentRepository.i18n
 
         private void Load()
         {
-            var resNodeType = ActiveSchema.NodeTypes[typeof(Resource).Name];
+            var resNodeType = Providers.Instance.StorageSchema.NodeTypes[typeof(Resource).Name];
             if (resNodeType != null)
             {
                 // search for all Resource content
@@ -140,7 +159,7 @@ namespace SenseNet.ContentRepository.i18n
                 {
                     IEnumerable<Node> nodes;
 
-                    var r = NodeQuery.QueryNodesByTypeAndPath(ActiveSchema.NodeTypes["Resource"]
+                    var r = NodeQuery.QueryNodesByTypeAndPath(Providers.Instance.StorageSchema.NodeTypes["Resource"]
                         , false
                         , String.Concat(RepositoryStructure.ResourceFolderPath, RepositoryPath.PathSeparator)
                         , true);

@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Linq;
+using System.Threading;
 using SenseNet.ContentRepository.Schema;
 using SenseNet.ContentRepository.Storage;
 using SenseNet.Search;
@@ -56,20 +57,26 @@ namespace SenseNet.ContentRepository
         public CalendarEvent(Node parent, string nodeTypeName) : base(parent, nodeTypeName) { }
         protected CalendarEvent(NodeToken nt) : base(nt) { }
 
-
+        [Obsolete("Use async version instead.", true)]
         public override void Save(SavingMode mode)
+        {
+            SaveAsync(mode, CancellationToken.None).GetAwaiter().GetResult();
+        }
+        public override async System.Threading.Tasks.Task SaveAsync(SavingMode mode, CancellationToken cancel)
         {
             // Creating registration form if necessary.
             if (GetReferenceCount(REGISTRATIONFORM) == 0 && Convert.ToBoolean(this["RequiresRegistration"]))
             {
                 var regFormFolder = Parent.GetPropertySafely("RegistrationFolder") as NodeList<Node>;
-                var formFolder = regFormFolder != null ? regFormFolder.FirstOrDefault() : null;
+                var formFolder = regFormFolder?.FirstOrDefault();
 
                 if (formFolder != null)
                 {
-                    var formName = String.Format("{0}_{1}", ParentName, this["Name"]);
+                    var formName = $"{ParentName}_{this["Name"]}";
 
-                    if (Content.Load(formFolder.Path + "/" + formName) == null)
+                    var content = await Content.LoadAsync(formFolder.Path + "/" + formName, cancel)
+                        .ConfigureAwait(false);
+                    if (content == null)
                     {
                         var regForm = Content.CreateNew("EventRegistrationForm", formFolder, formName);
 
@@ -89,9 +96,9 @@ namespace SenseNet.ContentRepository
 
                         regForm["EmailField"] = !String.IsNullOrEmpty(this["EmailField"].ToString()) ? this["EmailField"] : "mailerservice@example.com";
 
-                        regForm.Save();
+                        await regForm.SaveAsync(cancel).ConfigureAwait(false);
 
-                        AddReference(REGISTRATIONFORM, LoadNode(regForm.Id));
+                        AddReference(REGISTRATIONFORM, await LoadNodeAsync(regForm.Id, cancel).ConfigureAwait(false));
                     }
                 }
             }
@@ -110,7 +117,7 @@ namespace SenseNet.ContentRepository
                 }
             }
 
-            base.Save(mode);
+            await base.SaveAsync(mode, cancel).ConfigureAwait(false);
         }
 
         private static int GetNumberOfParticipants(Node item)
@@ -118,9 +125,10 @@ namespace SenseNet.ContentRepository
             var regForm = item.GetReference<Node>(REGISTRATIONFORM);
             if (regForm != null)
             {
-                var qResult = ContentQuery.Query("+Type:eventregistrationformitem +ParentId:@0",
+                var qResult = ContentQuery.QueryAsync("+Type:eventregistrationformitem +ParentId:@0",
                     new QuerySettings { EnableAutofilters = FilterStatus.Disabled, EnableLifespanFilter = FilterStatus.Disabled },
-                    regForm.Id);
+                    CancellationToken.None,
+                    regForm.Id).ConfigureAwait(false).GetAwaiter().GetResult();
 
                 var i = 0;
 

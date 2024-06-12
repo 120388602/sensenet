@@ -2,7 +2,10 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
+using SenseNet.Configuration;
+using SenseNet.ContentRepository.Schema;
 using SenseNet.ContentRepository.Search.Indexing.Activities;
 using SenseNet.ContentRepository.Storage;
 using SenseNet.ContentRepository.Storage.Data;
@@ -12,11 +15,23 @@ using SenseNet.Diagnostics;
 using SenseNet.Search;
 using SenseNet.Search.Indexing;
 using SenseNet.Search.Querying;
+using STT=System.Threading.Tasks;
 
 namespace SenseNet.ContentRepository.Search.Indexing
 {
-    internal class DocumentPopulator : IIndexPopulator
+    public class DocumentPopulator : IIndexPopulator
     {
+        private readonly IDataStore _dataStore;
+        private readonly IIndexManager _indexManager;
+        private IIndexingActivityFactory _indexingActivityFactory;
+
+        public DocumentPopulator(IDataStore dataStore, IIndexManager indexManager, IIndexingActivityFactory indexingActivityFactory)
+        {
+            _dataStore = dataStore;
+            _indexManager = indexManager;
+            _indexingActivityFactory = indexingActivityFactory;
+        }
+
         private class DocumentPopulatorData
         {
             internal Node Node { get; set; }
@@ -31,32 +46,53 @@ namespace SenseNet.ContentRepository.Search.Indexing
         /*======================================================================================================= IIndexPopulator Members */
 
         // caller: IndexPopulator.Populator, Import.Importer, Tests
-        public void ClearAndPopulateAll(TextWriter consoleWriter = null)
+        public async STT.Task ClearAndPopulateAllAsync(CancellationToken cancellationToken, TextWriter consoleWriter = null)
         {
-            using (var op = SnTrace.Index.StartOperation("IndexPopulator ClearAndPopulateAll"))
+            using var op = SnTrace.Index.StartOperation("IndexPopulator ClearAndPopulateAll");
+            using var sa = new SystemAccount();
+
+            var stopIndexing = false;
+
+            // We must not assume that the indexing engine works correctly without running.
+            // Local engines may work, but centralized engines do not. This is why we have to
+            // start it if it is not running already. In that case we have to stop it
+            // after the operation.
+            if (!_indexManager.Running)
             {
-                // recreate
-                consoleWriter?.Write("  Cleanup index ... ");
-                IndexManager.ClearIndex();
-                consoleWriter?.WriteLine("ok");
-
-                IndexManager.AddDocuments(LoadIndexDocumentsByPath("/Root"));
-
-                // delete progress characters
-                consoleWriter?.Write("                                             \n");
-                consoleWriter?.Write("  Commiting ... ");
-                IndexManager.Commit(); // explicit commit
-                consoleWriter?.WriteLine("ok");
-
-                consoleWriter?.Write("  Deleting indexing activities ... ");
-                IndexManager.DeleteAllIndexingActivities();
-                op.Successful = true;
+                await _indexManager.StartAsync(consoleWriter, cancellationToken).ConfigureAwait(false);
+                stopIndexing = true;
             }
+
+            Providers.Instance.SearchManager.SearchEngine.SetIndexingInfo(ContentTypeManager.Instance.IndexingInfo);
+
+            // recreate
+            consoleWriter?.Write("  Cleanup index ... ");
+            await _indexManager.ClearIndexAsync(cancellationToken).ConfigureAwait(false);
+            consoleWriter?.WriteLine("ok");
+
+            await _indexManager.AddDocumentsAsync(LoadIndexDocumentsByPath("/Root"), cancellationToken).ConfigureAwait(false);
+
+            // delete progress characters
+            consoleWriter?.Write("                                             \n");
+            consoleWriter?.Write("  Commiting ... ");
+            await _indexManager.CommitAsync(cancellationToken).ConfigureAwait(false); // explicit commit
+            consoleWriter?.WriteLine("ok");
+
+            consoleWriter?.Write("  Deleting indexing activities ... ");
+            await _indexManager.DeleteAllIndexingActivitiesAsync(cancellationToken).ConfigureAwait(false);
+
+            if (stopIndexing)
+                _indexManager.ShutDown();
+
+            op.Successful = true;
         }
 
         // caller: IndexPopulator.Populator
-        public void RebuildIndexDirectly(string path, IndexRebuildLevel level = IndexRebuildLevel.IndexOnly)
+        public async STT.Task RebuildIndexDirectlyAsync(string path, CancellationToken cancellationToken, 
+            IndexRebuildLevel level = IndexRebuildLevel.IndexOnly)
         {
+            Providers.Instance.SearchManager.SearchEngine.SetIndexingInfo(ContentTypeManager.Instance.IndexingInfo);
+
             if (level == IndexRebuildLevel.DatabaseAndIndex)
             {
                 using (var op2 = SnTrace.Index.StartOperation("IndexPopulator: Rebuild index documents."))
@@ -65,16 +101,22 @@ namespace SenseNet.ContentRepository.Search.Indexing
                     {
                         foreach (var node in Node.LoadNode(path).LoadVersions())
                         {
-                            DataBackingStore.SaveIndexDocument(node, false, false, out _);
+                            SnTrace.Test.Write("@@ WriteDoc: " + node.Path);
+                            await _dataStore.SaveIndexDocumentAsync(node, false, false, cancellationToken)
+                                .ConfigureAwait(false);
+
                             OnIndexDocumentRefreshed(node.Path, node.Id, node.VersionId, node.Version.ToString());
                         }
 
+                        //TODO: [async] make this parallel async (TPL DataFlow)
                         Parallel.ForEach(NodeQuery.QueryNodesByPath(path, true).Nodes,
                             n =>
                             {
                                 foreach (var node in n.LoadVersions())
                                 {
-                                    DataBackingStore.SaveIndexDocument(node, false, false, out _);
+                                    SnTrace.Test.Write("@@ WriteDoc: " + node.Path);
+                                    _dataStore.SaveIndexDocumentAsync(node, false, false, cancellationToken)
+                                        .GetAwaiter().GetResult();
                                     OnIndexDocumentRefreshed(node.Path, node.Id, node.VersionId, node.Version.ToString());
                                 }
                             });
@@ -85,19 +127,20 @@ namespace SenseNet.ContentRepository.Search.Indexing
 
             using (var op = SnTrace.Index.StartOperation("IndexPopulator: Rebuild index."))
             {
-                IndexManager.IndexingEngine.WriteIndex(
+                await Providers.Instance.SearchManager.SearchEngine.IndexingEngine.WriteIndexAsync(
                     new[] {new SnTerm(IndexFieldName.InTree, path)},
                     null,
-                    LoadIndexDocumentsByPath(path));
+                    LoadIndexDocumentsByPath(path),
+                    cancellationToken).ConfigureAwait(false);
                 op.Successful = true;
             }
         }
 
         // caller: CommitPopulateNode (rename), Node.MoveTo, Node.MoveMoreInternal
-        public void AddTree(string path, int nodeId)
+        public STT.Task AddTreeAsync(string path, int nodeId, CancellationToken cancellationToken)
         {
             // add new tree
-            CreateTreeActivityAndExecute(IndexingActivityType.AddTree, path, nodeId, null);
+            return CreateTreeActivityAndExecuteAsync(IndexingActivityType.AddTree, path, nodeId, null, cancellationToken);
         }
 
         // caller: Node.Save, Node.SaveCopied
@@ -123,7 +166,7 @@ namespace SenseNet.ContentRepository.Search.Indexing
             };
             return populatorData;
         }
-        public void CommitPopulateNode(object data, IndexDocumentData indexDocument = null)
+        public async STT.Task CommitPopulateNodeAsync(object data, IndexDocumentData indexDocument, CancellationToken cancellationToken)
         {
             var state = (DocumentPopulatorData)data;
             var versioningInfo = GetVersioningInfo(state);
@@ -132,20 +175,20 @@ namespace SenseNet.ContentRepository.Search.Indexing
             {
                 if (!state.OriginalPath.Equals(state.NewPath, StringComparison.InvariantCultureIgnoreCase))
                 {
-                    DeleteTree(state.OriginalPath, state.Node.Id);
-                    AddTree(state.NewPath, state.Node.Id);
+                    await DeleteTreeAsync(state.OriginalPath, state.Node.Id, cancellationToken).ConfigureAwait(false);
+                    await AddTreeAsync(state.NewPath, state.Node.Id, cancellationToken).ConfigureAwait(false);
                 }
                 else if (state.IsNewNode)
                 {
-                    CreateBrandNewNode(state.Node, versioningInfo, indexDocument);
+                    await CreateBrandNewNodeAsync(state.Node, versioningInfo, indexDocument, cancellationToken).ConfigureAwait(false);
                 }
                 else if (state.Settings.IsNewVersion())
                 {
-                    AddNewVersion(state.Node, versioningInfo, indexDocument);
+                    await AddNewVersionAsync(state.Node, versioningInfo, indexDocument, cancellationToken).ConfigureAwait(false);
                 }
                 else
                 {
-                    UpdateVersion(state, versioningInfo, indexDocument);
+                    await UpdateVersionAsync(state, versioningInfo, indexDocument, cancellationToken).ConfigureAwait(false);
                 }
 
                 var node = state.Node;
@@ -154,11 +197,12 @@ namespace SenseNet.ContentRepository.Search.Indexing
                 op.Successful = true;
             }
         }
-        public void FinalizeTextExtracting(object data, IndexDocumentData indexDocument)
+        public STT.Task FinalizeTextExtractingAsync(object data, IndexDocumentData indexDocument, CancellationToken cancellationToken)
         {
             var state = (DocumentPopulatorData)data;
             var versioningInfo = GetVersioningInfo(state);
-            UpdateVersion(state, versioningInfo, indexDocument);
+
+            return UpdateVersionAsync(state, versioningInfo, indexDocument, cancellationToken);
         }
 
         private VersioningInfo GetVersioningInfo(DocumentPopulatorData state)
@@ -187,31 +231,34 @@ namespace SenseNet.ContentRepository.Search.Indexing
         }
 
         // caller: CommitPopulateNode (rename), Node.MoveTo, Node.ForceDelete
-        public void DeleteTree(string path, int nodeId)
+        public STT.Task DeleteTreeAsync(string path, int nodeId, CancellationToken cancellationToken)
         {
-            CreateTreeActivityAndExecute(IndexingActivityType.RemoveTree, path, nodeId, null);
+            return CreateTreeActivityAndExecuteAsync(IndexingActivityType.RemoveTree, path, nodeId, null, cancellationToken);
         }
 
         // caller: Node.DeleteMoreInternal
-        public void DeleteForest(IEnumerable<Int32> idSet)
+        public async STT.Task DeleteForestAsync(IEnumerable<int> idSet, CancellationToken cancellationToken)
         {
             if (idSet == null)
                 throw new ArgumentNullException(nameof(idSet));
 
+            //TODO: [async] make this parallel async (TPL DataFlow)
             foreach (var head in NodeHead.Get(idSet))
-                DeleteTree(head.Path, head.Id);
+                await DeleteTreeAsync(head.Path, head.Id, cancellationToken).ConfigureAwait(false);
         }
         // caller: Node.MoveMoreInternal
-        public void DeleteForest(IEnumerable<string> pathSet)
+        public async STT.Task DeleteForestAsync(IEnumerable<string> pathSet, CancellationToken cancellationToken)
         {
             if (pathSet == null)
                 throw new ArgumentNullException(nameof(pathSet));
 
+            //TODO: [async] make this parallel async (TPL DataFlow)
             foreach (var head in NodeHead.Get(pathSet))
-                DeleteTree(head.Path, head.Id);
+                await DeleteTreeAsync(head.Path, head.Id, cancellationToken).ConfigureAwait(false);
         }
 
-        public void RebuildIndex(Node node, bool recursive = false, IndexRebuildLevel rebuildLevel = IndexRebuildLevel.IndexOnly)
+        public async STT.Task RebuildIndexAsync(Node node, CancellationToken cancellationToken, bool recursive = false,
+            IndexRebuildLevel rebuildLevel = IndexRebuildLevel.IndexOnly)
         {
             using (var op = SnTrace.Index.StartOperation("DocumentPopulator.RefreshIndex. Version: {0}, VersionId: {1}, recursive: {2}, level: {3}", node.Version, node.VersionId, recursive, rebuildLevel))
             {
@@ -219,22 +266,23 @@ namespace SenseNet.ContentRepository.Search.Indexing
                 {
                     var databaseAndIndex = rebuildLevel == IndexRebuildLevel.DatabaseAndIndex;
                     if (recursive)
-                        RebuildIndex_Recursive(node, databaseAndIndex);
+                        await RebuildIndex_RecursiveAsync(node, databaseAndIndex, cancellationToken).ConfigureAwait(false);
                     else
-                        RebuildIndex_NoRecursive(node, databaseAndIndex);
+                        await RebuildIndex_NoRecursiveAsync(node, databaseAndIndex, cancellationToken).ConfigureAwait(false);
                 }
                 op.Successful = true;
             }
         }
-        private void RebuildIndex_NoRecursive(Node node, bool databaseAndIndex)
+        private async STT.Task RebuildIndex_NoRecursiveAsync(Node node, bool databaseAndIndex, CancellationToken cancellationToken)
         {
-            TreeLock.AssertFree(node.Path);
+            await Providers.Instance.TreeLock.AssertFreeAsync(cancellationToken, node.Path).ConfigureAwait(false);
 
             var head = NodeHead.Get(node.Id);
             if (databaseAndIndex)
             {
                 foreach (var version in head.Versions.Select(v => Node.LoadNodeByVersionId(v.VersionId)))
-                    DataBackingStore.SaveIndexDocument(version, false, false, out _);
+                    await _dataStore.SaveIndexDocumentAsync(version, false, false, cancellationToken)
+                        .ConfigureAwait(false);
             }
 
             var versioningInfo = new VersioningInfo
@@ -245,23 +293,40 @@ namespace SenseNet.ContentRepository.Search.Indexing
                 Reindex = new int[0]
             };
 
-            CreateActivityAndExecute(IndexingActivityType.Rebuild, node.Path, node.Id, 0, 0, versioningInfo, null);
+            await CreateActivityAndExecuteAsync(IndexingActivityType.Rebuild, node.Path, node.Id, 0, 0, versioningInfo,
+                null, cancellationToken).ConfigureAwait(false);
         }
 
-        private void RebuildIndex_Recursive(Node node, bool databaseAndIndex)
+        private async STT.Task RebuildIndex_RecursiveAsync(Node node, bool databaseAndIndex, CancellationToken cancellationToken)
         {
-            using (TreeLock.Acquire(node.Path))
+            using (await Providers.Instance.TreeLock.AcquireAsync(cancellationToken, node.Path).ConfigureAwait(false))
             {
-                DeleteTree(node.Path, node.Id);
+                await DeleteTreeAsync(node.Path, node.Id, cancellationToken).ConfigureAwait(false);
+
                 if (databaseAndIndex)
                 {
-                    DataBackingStore.SaveIndexDocument(node, false, false, out _);
+                    await _dataStore.SaveIndexDocumentAsync(node, false, false, cancellationToken).ConfigureAwait(false);
 
+                    var currentUser = AccessProvider.Current.GetCurrentUser();
+                    var currentUserIsSystem = currentUser.Id == Identifiers.SystemUserId;
+                    if (currentUserIsSystem)
+                        currentUser = AccessProvider.Current.GetOriginalUser();
+
+                    //TODO: [async] make this parallel async (TPL DataFlow TransformBlock)
                     Parallel.ForEach(NodeQuery.QueryNodesByPath(node.Path, true).Nodes,
-                        n => { DataBackingStore.SaveIndexDocument(n, false, false, out _); });
+                        new ParallelOptions { CancellationToken = cancellationToken },
+                        n =>
+                        {
+                            AccessProvider.Current.SetCurrentUser(currentUser);
+                            if (currentUserIsSystem)
+                                AccessProvider.ChangeToSystemAccount();
+
+                            _dataStore.SaveIndexDocumentAsync(n, false, false, CancellationToken.None)
+                                .GetAwaiter().GetResult();
+                        });
                 }
 
-                AddTree(node.Path, node.Id);
+                await AddTreeAsync(node.Path, node.Id, cancellationToken).ConfigureAwait(false);
             }
         }
 
@@ -287,12 +352,13 @@ namespace SenseNet.ContentRepository.Search.Indexing
 
         private IEnumerable<IndexDocument> LoadIndexDocumentsByPath(string path)
         {
-            return SearchManager.LoadIndexDocumentsByPath(path, IndexManager.GetNotIndexedNodeTypes())
+            var indxDocs = _dataStore.LoadIndexDocumentsAsync(path, _indexManager.GetNotIndexedNodeTypes());
+            return indxDocs
                 .Select(d =>
                 {
                     try
                     {
-                        var indexDoc = IndexManager.CompleteIndexDocument(d);
+                        var indexDoc = _indexManager.CompleteIndexDocument(d);
                         OnNodeIndexed(d.Path, d.NodeId, d.VersionId, indexDoc.Version);
                         return indexDoc;
                     }
@@ -306,26 +372,26 @@ namespace SenseNet.ContentRepository.Search.Indexing
         }
 
         // caller: CommitPopulateNode
-        private static void CreateBrandNewNode(Node node, VersioningInfo versioningInfo, IndexDocumentData indexDocumentData)
+        private STT.Task CreateBrandNewNodeAsync(Node node, VersioningInfo versioningInfo, IndexDocumentData indexDocumentData, CancellationToken cancellationToken)
         {
-            CreateActivityAndExecute(IndexingActivityType.AddDocument, node.Path, node.Id, node.VersionId, node.VersionTimestamp, versioningInfo, indexDocumentData);
+            return CreateActivityAndExecuteAsync(IndexingActivityType.AddDocument, node.Path, node.Id, node.VersionId, node.VersionTimestamp, versioningInfo, indexDocumentData, cancellationToken);
         }
         // caller: CommitPopulateNode
-        private static void AddNewVersion(Node newVersion, VersioningInfo versioningInfo, IndexDocumentData indexDocumentData)
+        private STT.Task AddNewVersionAsync(Node newVersion, VersioningInfo versioningInfo, IndexDocumentData indexDocumentData, CancellationToken cancellationToken)
         {
-            CreateActivityAndExecute(IndexingActivityType.AddDocument, newVersion.Path, newVersion.Id, newVersion.VersionId, newVersion.VersionTimestamp, versioningInfo, indexDocumentData);
+            return CreateActivityAndExecuteAsync(IndexingActivityType.AddDocument, newVersion.Path, newVersion.Id, newVersion.VersionId, newVersion.VersionTimestamp, versioningInfo, indexDocumentData, cancellationToken);
         }
         // caller: CommitPopulateNode
-        private static void UpdateVersion(DocumentPopulatorData state, VersioningInfo versioningInfo, IndexDocumentData indexDocumentData)
+        private STT.Task UpdateVersionAsync(DocumentPopulatorData state, VersioningInfo versioningInfo, IndexDocumentData indexDocumentData, CancellationToken cancellationToken)
         {
-            CreateActivityAndExecute(IndexingActivityType.UpdateDocument, state.OriginalPath, state.Node.Id, state.Node.VersionId, state.Node.VersionTimestamp, versioningInfo, indexDocumentData);
+            return CreateActivityAndExecuteAsync(IndexingActivityType.UpdateDocument, state.OriginalPath, state.Node.Id, state.Node.VersionId, state.Node.VersionTimestamp, versioningInfo, indexDocumentData, cancellationToken);
         }
 
         /*================================================================================================================================*/
 
-        private static IndexingActivityBase CreateActivity(IndexingActivityType type, string path, int nodeId, int versionId, long versionTimestamp, VersioningInfo versioningInfo, IndexDocumentData indexDocumentData)
+        internal IndexingActivityBase CreateActivity(IndexingActivityType type, string path, int nodeId, int versionId, long versionTimestamp, VersioningInfo versioningInfo, IndexDocumentData indexDocumentData)
         {
-            var activity = (IndexingActivityBase)IndexingActivityFactory.Instance.CreateActivity(type);
+            var activity = (IndexingActivityBase)_indexingActivityFactory.CreateActivity(type);
             activity.Path = path.ToLowerInvariant();
             activity.NodeId = nodeId;
             activity.VersionId = versionId;
@@ -342,9 +408,9 @@ namespace SenseNet.ContentRepository.Search.Indexing
 
             return activity;
         }
-        private static IndexingActivityBase CreateTreeActivity(IndexingActivityType type, string path, int nodeId, IndexDocumentData indexDocumentData)
+        internal IndexingActivityBase CreateTreeActivity(IndexingActivityType type, string path, int nodeId, IndexDocumentData indexDocumentData)
         {
-            var activity = (IndexingActivityBase)IndexingActivityFactory.Instance.CreateActivity(type);
+            var activity = (IndexingActivityBase)_indexingActivityFactory.CreateActivity(type);
             activity.Path = path.ToLowerInvariant();
             activity.NodeId = nodeId;
 
@@ -356,18 +422,18 @@ namespace SenseNet.ContentRepository.Search.Indexing
 
             return activity;
         }
-        private static void CreateActivityAndExecute(IndexingActivityType type, string path, int nodeId, int versionId, long versionTimestamp, VersioningInfo versioningInfo, IndexDocumentData indexDocumentData)
+        private STT.Task CreateActivityAndExecuteAsync(IndexingActivityType type, string path, int nodeId, int versionId, long versionTimestamp, VersioningInfo versioningInfo, IndexDocumentData indexDocumentData, CancellationToken cancellationToken)
         {
-            ExecuteActivity(CreateActivity(type, path, nodeId, versionId, versionTimestamp, versioningInfo, indexDocumentData));
+            return ExecuteActivityAsync(CreateActivity(type, path, nodeId, versionId, versionTimestamp, versioningInfo, indexDocumentData), cancellationToken);
         }
-        private static void CreateTreeActivityAndExecute(IndexingActivityType type, string path, int nodeId, IndexDocumentData indexDocumentData)
+        private STT.Task CreateTreeActivityAndExecuteAsync(IndexingActivityType type, string path, int nodeId, IndexDocumentData indexDocumentData, CancellationToken cancellationToken)
         {
-            ExecuteActivity(CreateTreeActivity(type, path, nodeId, indexDocumentData));
+            return ExecuteActivityAsync(CreateTreeActivity(type, path, nodeId, indexDocumentData), cancellationToken);
         }
-        private static void ExecuteActivity(IndexingActivityBase activity)
+        private async STT.Task ExecuteActivityAsync(IndexingActivityBase activity, CancellationToken cancellationToken)
         {
-            IndexManager.RegisterActivity(activity);
-            IndexManager.ExecuteActivity(activity);
+            await _indexManager.RegisterActivityAsync(activity, cancellationToken).ConfigureAwait(false);
+            await _indexManager.ExecuteActivityAsync(activity, cancellationToken).ConfigureAwait(false);
         }
     }
 }

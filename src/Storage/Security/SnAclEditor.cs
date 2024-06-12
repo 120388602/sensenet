@@ -3,6 +3,10 @@ using SenseNet.Diagnostics;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using SenseNet.Configuration;
+using SenseNet.Events;
 using SenseNet.Security;
 
 namespace SenseNet.ContentRepository.Storage.Security
@@ -19,9 +23,10 @@ namespace SenseNet.ContentRepository.Storage.Security
         /// Gets the current SnSecurityContext
         /// </summary>
         public new SnSecurityContext Context => (SnSecurityContext)base.Context;
+        private IEventDistributor EventDistributor => Providers.Instance.EventDistributor;
 
         internal SnAclEditor(SnSecurityContext context, EntryType entryType = EntryType.Normal)
-            : base(context ?? SecurityHandler.SecurityContext, entryType) { }
+            : base(context ?? Providers.Instance.SecurityHandler.SecurityContext, entryType) { }
 
         private new static SenseNet.Security.AclEditor Create(SenseNet.Security.SecurityContext context, EntryType entryType = EntryType.Normal)
         {
@@ -191,7 +196,7 @@ namespace SenseNet.ContentRepository.Storage.Security
         /// <param name="categoriesToCopy">After the break operation, all previous effective permissions will be
         /// copied explicitly that match any of the given entry types.</param>
         /// <returns>A reference to this instance for calling more operations.</returns>
-        public new AclEditor BreakInheritance(int entityId, EntryType[] categoriesToCopy)
+        public new SnAclEditor BreakInheritance(int entityId, EntryType[] categoriesToCopy)
         {
             base.BreakInheritance(entityId, categoriesToCopy);
             return this;
@@ -215,21 +220,71 @@ namespace SenseNet.ContentRepository.Storage.Security
         /// <param name="entityId">The requested entity.</param>
         /// <param name="categoriesToNormalize">Unnecessary explicit entries that match the provided categories will be removed.</param>
         /// <returns>A reference to this instance for calling more operations.</returns>
-        public new AclEditor UnbreakInheritance(int entityId, EntryType[] categoriesToNormalize)
+        public new SnAclEditor UnbreakInheritance(int entityId, EntryType[] categoriesToNormalize)
         {
-            base.UnbreakInheritance(entityId, categoriesToNormalize);
+            base.UnBreakInheritance(entityId, categoriesToNormalize);
             return this;
         }
 
+        [Obsolete("Use async version instead.", true)]// Security
+        internal void Apply(IEnumerable<PermissionAction> actions)
+        {
+            var noCopy = new EntryType[0];
+            foreach (var action in actions)
+            {
+                var entityId = action.EntityId;
+
+                if (action.Break)
+                    BreakInheritance(entityId, noCopy);
+                else if (action.Unbreak)
+                    UnbreakInheritance(entityId, noCopy);
+
+                foreach (var entry in action.Entries)
+                    Set(entityId, entry.IdentityId, entry.LocalOnly,
+                        new PermissionBitMask { AllowBits = entry.AllowBits, DenyBits = entry.DenyBits });
+            }
+            Apply();
+        }
+        internal async Task ApplyAsync(IEnumerable<PermissionAction> actions, CancellationToken cancel)
+        {
+            var noCopy = new EntryType[0];
+            foreach (var action in actions)
+            {
+                var entityId = action.EntityId;
+
+                if (action.Break)
+                    BreakInheritance(entityId, noCopy);
+                else if (action.Unbreak)
+                    UnbreakInheritance(entityId, noCopy);
+
+                foreach (var entry in action.Entries)
+                    Set(entityId, entry.IdentityId, entry.LocalOnly,
+                        new PermissionBitMask { AllowBits = entry.AllowBits, DenyBits = entry.DenyBits });
+            }
+            await ApplyAsync(cancel).ConfigureAwait(false);
+        }
         /// <summary>
         /// Executes all modifications.
         /// Current user must have SetPermissions permission on any modified entity.
         /// An Auditlog record with changed data will be writen.
         /// OnPermissionChanging and OnPermissionChanged events are fired on any active NodeObserver.
         /// </summary>
+        [Obsolete("Use async version instead.", true)]// Security
         public override void Apply()
         {
-            Apply(null);
+            Apply((List<Type>)null);
+        }
+        /// <summary>
+        /// Executes all modifications.
+        /// Current user must have SetPermissions permission on any modified entity.
+        /// An Auditlog record with changed data will be writen.
+        /// OnPermissionChanging and OnPermissionChanged events are fired on any active NodeObserver.
+        /// </summary>
+        /// <param name="cancel">The token to monitor for cancellation requests.</param>
+        /// <returns>A Task that represents the asynchronous operation.</returns>
+        public override Task ApplyAsync(CancellationToken cancel)
+        {
+            return ApplyAsync((List<Type>)null, cancel);
         }
 
         /// <summary>
@@ -239,6 +294,7 @@ namespace SenseNet.ContentRepository.Storage.Security
         /// OnPermissionChanging and OnPermissionChanged events are fired on any active NodeObserver that is not in the exclusion list (see "disabledObservers" parameter).
         /// </summary>
         /// <param name="disabledObservers">NodeObserver exclusion list.</param>
+        [Obsolete("Use async version instead.", true)]// Security
         public void Apply(List<Type> disabledObservers)
         {
             foreach (var entityId in this._acls.Keys)
@@ -248,7 +304,7 @@ namespace SenseNet.ContentRepository.Storage.Security
                 {
                     { "Entities", this._acls.Count },
                     { "Breaks", this._breaks.Count },
-                    { "Unbreaks", this._unbreaks.Count }
+                    { "Unbreaks", this._unBreaks.Count }
                 }))
             {
                 using (var op = SnTrace.Security.StartOperation("AclEditor.Apply (acl count: {0})", _acls.Count))
@@ -280,7 +336,7 @@ namespace SenseNet.ContentRepository.Storage.Security
                         }
                     }
                     // unbreaks that are not in changed aces
-                    foreach (var entityId in this._unbreaks)
+                    foreach (var entityId in this._unBreaks)
                     {
                         if (!this._acls.ContainsKey(entityId))
                         {
@@ -299,6 +355,13 @@ namespace SenseNet.ContentRepository.Storage.Security
                         NodeObserver.FireOnPermissionChanging(null, null, args1, disabledObservers);
                         if (args1.Cancel)
                             throw new CancelNodeEventException(args1.CancelMessage, args1.EventType, null);
+
+                        var canceled = EventDistributor.FireCancellableNodeObserverEventAsync(
+                                new NodePermissionChangingEvent(args1), null)
+                            .ConfigureAwait(false).GetAwaiter().GetResult();
+                        if (canceled)
+                            throw new CancelNodeEventException(args1.CancelMessage, args1.EventType, null);
+
                         op1.Successful = true;
                     }
 
@@ -315,6 +378,127 @@ namespace SenseNet.ContentRepository.Storage.Security
                     using (var op2 = SnTrace.Security.StartOperation("AclEditor.Apply / FireOnPermissionChanged"))
                     {
                         NodeObserver.FireOnPermissionChanged(null, null, args2, disabledObservers);
+
+                        EventDistributor.FireNodeObserverEventAsync(new NodePermissionChangedEvent(args2), null)
+                            .ConfigureAwait(false).GetAwaiter().GetResult();
+
+                        op2.Successful = true;
+                    }
+
+                    // iterate through all edited entities and log changes one by one
+                    for (var i = 0; i < relatedEntities.Count; i++)
+                    {
+                        var entity = relatedNodeHeads[i];
+                        SnLog.WriteAudit(AuditEvent.PermissionChanged, new Dictionary<string, object>
+                        {
+                            { "Id", entity != null ? entity.Id : 0 },
+                            { "Path", entity != null ? entity.Path : string.Empty},
+                            { "Type",  changedData[0].Name },
+                            { "OldAcl",  (changedData[0].Original as List<string>)[i] }, // changed data lists are in the same order as relatedentities
+                            { "NewAcl", (changedData[0].Value as List<string>)[i] }
+                        });
+                    }
+                    op.Successful = true;
+                }
+                audit.Successful = true;
+            }
+        }
+        /// <summary>
+        /// Executes all modifications.
+        /// Current user must have SetPermissions permission on any modified entity.
+        /// An Auditlog record with changed data will be writen.
+        /// OnPermissionChanging and OnPermissionChanged events are fired on any active NodeObserver that is not in the exclusion list (see "disabledObservers" parameter).
+        /// </summary>
+        /// <param name="disabledObservers">NodeObserver exclusion list.</param>
+        /// <param name="cancel">The token to monitor for cancellation requests.</param>
+        /// <returns>A Task that represents the asynchronous operation.</returns>
+        public async Task ApplyAsync(List<Type> disabledObservers, CancellationToken cancel)
+        {
+            foreach (var entityId in this._acls.Keys)
+                this.Context.AssertPermission(entityId, PermissionType.SetPermissions);
+            using (var audit = new AuditBlock(AuditEvent.PermissionChanged, "Trying to execute permission modifications",
+                new Dictionary<string, object>
+                {
+                    { "Entities", this._acls.Count },
+                    { "Breaks", this._breaks.Count },
+                    { "Unbreaks", this._unBreaks.Count }
+                }))
+            {
+                using (var op = SnTrace.Security.StartOperation("AclEditor.Apply (acl count: {0})", _acls.Count))
+                {
+                    string msg = null;
+                    if ((msg = Validate(this._acls)) != null)
+                    {
+                        // Log the error, but allow the operation to continue, because acl editor
+                        // may contain many different operations that we do not want to lose.
+                        SnLog.WriteWarning("Invalid ACL: " + msg, EventId.Security);
+                    }
+
+                    var relatedEntities = new List<int>();
+                    // collect related aces
+                    var originalAces = new List<string>();
+                    // changed acls
+                    foreach (var entityId in this._acls.Keys)
+                    {
+                        relatedEntities.Add(entityId);
+                        originalAces.Add(AcesToString(entityId, this.Context.GetExplicitEntries(entityId)));
+                    }
+                    // breaks that are not in changed aces
+                    foreach (var entityId in this._breaks)
+                    {
+                        if (!this._acls.ContainsKey(entityId))
+                        {
+                            relatedEntities.Add(entityId);
+                            originalAces.Add(AcesToString(entityId, this.Context.GetExplicitEntries(entityId)));
+                        }
+                    }
+                    // unbreaks that are not in changed aces
+                    foreach (var entityId in this._unBreaks)
+                    {
+                        if (!this._acls.ContainsKey(entityId))
+                        {
+                            relatedEntities.Add(entityId);
+                            originalAces.Add(AcesToString(entityId, this.Context.GetExplicitEntries(entityId)));
+                        }
+                    }
+
+                    var relatedNodeHeads = relatedEntities.Select(NodeHead.Get).ToArray();
+                    var changedData = new[] { new ChangedData { Name = "SetPermissions", Original = originalAces } };
+
+                    // fire "before" event
+                    var args1 = new CancellablePermissionChangingEventArgs(relatedNodeHeads, changedData);
+                    using (var op1 = SnTrace.Security.StartOperation("AclEditor.Apply / FireOnPermissionChanging"))
+                    {
+                        NodeObserver.FireOnPermissionChanging(null, null, args1, disabledObservers);
+                        if (args1.Cancel)
+                            throw new CancelNodeEventException(args1.CancelMessage, args1.EventType, null);
+
+                        var canceled = await EventDistributor.FireCancellableNodeObserverEventAsync(
+                                new NodePermissionChangingEvent(args1), null)
+                            .ConfigureAwait(false);
+                        if (canceled)
+                            throw new CancelNodeEventException(args1.CancelMessage, args1.EventType, null);
+
+                        op1.Successful = true;
+                    }
+
+                    var customData = args1.GetCustomData();
+
+                    // main operation
+                    await base.ApplyAsync(cancel).ConfigureAwait(false);
+
+                    // collect new values
+                    changedData[0].Value = relatedEntities.Select(x => AcesToString(x, this.Context.GetExplicitEntries(x))).ToList();
+
+                    // fire "after" event
+                    var args2 = new PermissionChangedEventArgs(relatedNodeHeads, customData, changedData);
+                    using (var op2 = SnTrace.Security.StartOperation("AclEditor.Apply / FireOnPermissionChanged"))
+                    {
+                        NodeObserver.FireOnPermissionChanged(null, null, args2, disabledObservers);
+
+                        await EventDistributor.FireNodeObserverEventAsync(new NodePermissionChangedEvent(args2), null)
+                            .ConfigureAwait(false);
+
                         op2.Successful = true;
                     }
 
@@ -411,7 +595,7 @@ namespace SenseNet.ContentRepository.Storage.Security
             var allowedBefore = (allowBits & thisbit) != 0uL;
             var deniedBefore = (denyBits & thisbit) != 0uL;
 
-            var dependencyTable = SecurityHandler.PermissionDependencyTable;
+            var dependencyTable = Providers.Instance.SecurityHandler.PermissionDependencyTable;
             switch (permissionValue)
             {
                 case SenseNet.Security.PermissionValue.Allowed:
@@ -485,5 +669,6 @@ namespace SenseNet.ContentRepository.Storage.Security
             var ace = acl.Entries.Where(e => e.IdentityId == identityId && e.LocalOnly == localOnly).FirstOrDefault();
             return ace;
         }
+
     }
 }

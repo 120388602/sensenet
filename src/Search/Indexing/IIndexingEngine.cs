@@ -1,5 +1,7 @@
 ﻿using System.Collections.Generic;
 using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
 using SenseNet.Search.Querying;
 
 namespace SenseNet.Search.Indexing
@@ -23,30 +25,63 @@ namespace SenseNet.Search.Indexing
         /// Initializes the IIndexingEngine instance.
         /// ConsoleOut can be used for writing interactive messages if the system is running under an administrative tool.
         /// </summary>
-        void Start(TextWriter consoleOut);
+        /// <param name="consoleOut">Console to write messages to.</param>
+        /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
+        /// <returns>A Task that represents the asynchronous operation.</returns>
+        Task StartAsync(TextWriter consoleOut, CancellationToken cancellationToken);
 
         /// <summary>
         /// Stops the indexing and releases all inner and outer resources.  This is not a destructor.
         /// </summary>
-        void ShutDown();
+        /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
+        /// <returns>A Task that represents the asynchronous operation.</returns>
+        Task ShutDownAsync(CancellationToken cancellationToken);
+
+        /// <summary>
+        /// Takes a snapshot of the index and copies it to the given target.
+        /// Target is typically a directory in the filesystem.
+        /// The backup is exclusive operation, can be started only once.
+        /// </summary>
+        /// <param name="target">Path of the target directory or any other target definition.</param>
+        /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
+        /// <returns>A Task that represents the asynchronous operation and wraps the <see cref="BackupResponse"/>.</returns>
+        Task<BackupResponse> BackupAsync(string target, CancellationToken cancellationToken);
+        /// <summary>
+        /// Queries the backup state in the system.
+        /// </summary>
+        /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
+        /// <returns>A Task that represents the asynchronous operation and wraps the <see cref="BackupResponse"/>.</returns>
+        Task<BackupResponse> QueryBackupAsync(CancellationToken cancellationToken);
+        /// <summary>
+        /// Requests the stopping the currently running backup operation.
+        /// </summary>
+        /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
+        /// <returns>A Task that represents the asynchronous operation and wraps the <see cref="BackupResponse"/>.</returns>
+        Task<BackupResponse> CancelBackupAsync(CancellationToken cancellationToken);
 
         /// <summary>
         /// Deletes the current index and creates a brand new empty one.
         /// </summary>
-        void ClearIndex();
+        /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
+        /// <returns>A Task that represents the asynchronous operation.</returns>
+        Task ClearIndexAsync(CancellationToken cancellationToken);
 
         /// <summary>
         /// Returns an IndexingActivityStatus instance that was associated to the index state.
         /// Called once in the system startup sequence and periodically in the index health check.
         /// </summary>
-        /// <returns></returns>
-        IndexingActivityStatus ReadActivityStatusFromIndex();
+        /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
+        /// <returns>A Task that represents the asynchronous operation and wraps the indexing activity status.</returns>
+        Task<IndexingActivityStatus> ReadActivityStatusFromIndexAsync(CancellationToken cancellationToken);
 
         /// <summary>
         /// Associate the given indexing state to the index. This method is called after index writing.
         /// In heavy load the status writing is not as dense than the index writing.
         /// </summary>
-        void WriteActivityStatusToIndex(IndexingActivityStatus state);
+        /// <param name="state">The indexing activity state to write.</param>
+        /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
+        /// <returns>A Task that represents the asynchronous operation.</returns>
+        Task WriteActivityStatusToIndexAsync(IndexingActivityStatus state, CancellationToken cancellationToken);
 
         /// <summary>
         /// Executes an atomic indexing operation. Deletes all index documents by "deletions" parameter,
@@ -62,6 +97,34 @@ namespace SenseNet.Search.Indexing
         /// <param name="deletions">Contains terms that define the documents to delete. Can be null or empty.</param>
         /// <param name="updates">Contains term-document pairs that define the refreshed items. Can be null or empty.</param>
         /// <param name="additions">Contains documents to add to index.</param>
-        void WriteIndex(IEnumerable<SnTerm> deletions, IEnumerable<DocumentUpdate> updates, IEnumerable<IndexDocument> additions);
+        /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
+        /// <returns>A Task that represents the asynchronous operation.</returns>
+        Task WriteIndexAsync(IEnumerable<SnTerm> deletions, IEnumerable<DocumentUpdate> updates,
+            IEnumerable<IndexDocument> additions, CancellationToken cancellationToken);
+
+        IndexProperties GetIndexProperties();
+        Task<IDictionary<string, IDictionary<string, List<int>>>> GetInvertedIndexAsync(CancellationToken cancel);
+        Task<IDictionary<string, List<int>>> GetInvertedIndexAsync(string fieldName, CancellationToken cancel);
+        IDictionary<string, string> GetIndexDocumentByVersionId(int versionId);
+        IDictionary<string, string> GetIndexDocumentByDocumentId(int documentId);
+    }
+
+    /// <summary>
+    /// Provides aggregated information of the index.
+    /// </summary>
+    public class IndexProperties
+    {
+        /// <summary>
+        /// Gets or sets the current <see cref="IndexingActivityStatus"/>.
+        /// </summary>
+        public IndexingActivityStatus IndexingActivityStatus { get; set; }
+        /// <summary>
+        /// Gets or sets ordered list of all field names and term count of the index.
+        /// </summary>
+        public IEnumerable<KeyValuePair<string, int>> FieldInfo { get; set; }
+        /// <summary>
+        /// Gets or sets ordered list of all VersionIds in the index.
+        /// </summary>
+        public IEnumerable<int> VersionIds { get; set; }
     }
 }

@@ -1,0 +1,19 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<ContentMetaData>
+  <ContentType>User</ContentType>
+  <ContentName>PublicAdmin</ContentName>
+  <Fields>
+    <Enabled>true</Enabled>
+    <FullName>PublicAdmin</FullName>
+    <LoginName>PublicAdmin</LoginName>
+    <Email>PublicAdmin@example.com</Email>
+    <Password>
+      <Text>PublicAdmin</Text>
+    </Password>
+  </Fields>
+  <Permissions>
+    <Identity path="/Root/IMS/Public/Administrators">
+      <Open>Allow</Open>
+    </Identity>
+  </Permissions>
+</ContentMetaData>

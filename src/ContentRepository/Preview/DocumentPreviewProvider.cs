@@ -1,12 +1,12 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
-using System.Drawing.Drawing2D;
-using System.Drawing.Imaging;
 using IO = System.IO;
 using System.Linq;
-using System.Configuration;
 using System.Text.RegularExpressions;
 using System.Threading;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using SenseNet.ApplicationModel;
@@ -19,14 +19,19 @@ using SenseNet.ContentRepository.Versioning;
 using SenseNet.Diagnostics;
 using SenseNet.ContentRepository.Storage;
 using SenseNet.ContentRepository.Storage.Security;
-using SenseNet.BackgroundOperations;
 using Newtonsoft.Json.Converters;
 using SenseNet.Configuration;
-using SenseNet.ContentRepository.Search.Querying;
+using SenseNet.ContentRepository.Fields;
+using SenseNet.ContentRepository.Schema;
+using SenseNet.Extensions.DependencyInjection;
 using SenseNet.TaskManagement.Core;
 using SenseNet.Tools;
+using SkiaSharp;
 using Retrier = SenseNet.ContentRepository.Storage.Retrier;
+using Task = System.Threading.Tasks.Task;
+// ReSharper disable InconsistentNaming
 
+// ReSharper disable once CheckNamespace
 namespace SenseNet.Preview
 {
     public enum WatermarkPosition { BottomLeftToUpperRight, UpperLeftToBottomRight, Top, Bottom, Center }
@@ -61,33 +66,26 @@ namespace SenseNet.Preview
 
     public class WatermarkDrawingInfo
     {
-        private readonly System.Drawing.Image _image;
-        private readonly System.Drawing.Graphics _context;
-
         public string WatermarkText { get; set; }
-        public System.Drawing.Font Font { get; set; }
+        public SKFont Font { get; set; }
         public WatermarkPosition Position { get; set; }
-        public System.Drawing.Color Color { get; set; }
+        public SKColor Color { get; set; }
+        public SKBitmap Image { get; }
+        public SKCanvas DrawingContext { get; }
+        public SKPaint Paint { get; }
 
-        public WatermarkDrawingInfo(System.Drawing.Image image, System.Drawing.Graphics context)
+        public WatermarkDrawingInfo(SKBitmap image, SKCanvas context, SKPaint paint)
         {
-            if (image == null) 
-                throw new ArgumentNullException("image");
-            if (context == null)
-                throw new ArgumentNullException("context");
-
-            _image = image;
-            _context = context;
+            Image = image ?? throw new ArgumentNullException(nameof(image));
+            DrawingContext = context ?? throw new ArgumentNullException(nameof(context));
+            Paint = paint;
         }
 
-        public System.Drawing.Image Image
+        public SKSize MeasureString(string text)
         {
-            get { return _image; }
-        }
-
-        public System.Drawing.Graphics DrawingContext
-        {
-            get { return _context; }
+            var rectangle = new SKRect();
+            var _ = Paint.MeasureText(text, ref rectangle);
+            return new SKSize(rectangle.Width, rectangle.Height);
         }
     }
 
@@ -109,8 +107,16 @@ namespace SenseNet.Preview
         public static readonly string PREVIEW_THUMBNAIL_REGEX = "(preview|thumbnail)(?<page>\\d+).png";
         public static readonly string THUMBNAIL_REGEX = "thumbnail(?<page>\\d+).png";
 
-        protected static readonly float THUMBNAIL_PREVIEW_WIDTH_RATIO = Common.THUMBNAIL_WIDTH / (float)Common.PREVIEW_WIDTH;
-        protected static readonly float THUMBNAIL_PREVIEW_HEIGHT_RATIO = Common.THUMBNAIL_HEIGHT / (float)Common.PREVIEW_HEIGHT;
+        // these values must be the same as in the preview library
+        internal static readonly int THUMBNAIL_WIDTH = 200;
+        internal static readonly int THUMBNAIL_HEIGHT = 200;
+        internal static readonly int PREVIEW_WIDTH = 1754;
+        internal static readonly int PREVIEW_HEIGHT = 1754;
+        internal static readonly string PREVIEW_IMAGENAME = "preview{0}.png";
+        internal static readonly string THUMBNAIL_IMAGENAME = "thumbnail{0}.png";
+
+        protected static readonly float THUMBNAIL_PREVIEW_WIDTH_RATIO = THUMBNAIL_WIDTH / (float)PREVIEW_WIDTH;
+        protected static readonly float THUMBNAIL_PREVIEW_HEIGHT_RATIO = THUMBNAIL_HEIGHT / (float)PREVIEW_HEIGHT;
 
         protected static readonly int PREVIEW_PDF_WIDTH = 600;
         protected static readonly int PREVIEW_PDF_HEIGHT = 850;
@@ -125,52 +131,22 @@ namespace SenseNet.Preview
 
         // ===================================================================================================== Static provider instance
 
-        private static DocumentPreviewProvider _current;
-        private static readonly object _lock = new object();
-        private static bool _isInitialized;
-        public static DocumentPreviewProvider Current
+        // This property has a duplicate in the Storage layer in the PreviewProvider
+        // class. If you change this, please propagate changes there.
+        // In this layer we assume that the provider is an instance of the DocumentPreviewProvider
+        // class that we are in now. The setter extension methods in the Preview package
+        // will make sure this is true.
+        public static DocumentPreviewProvider Current => (DocumentPreviewProvider)Providers.Instance.PreviewProvider;
+
+        protected TaskManagementOptions TaskManagementOptions { get; }
+        protected ITaskManager TaskManager { get; }
+
+        protected DocumentPreviewProvider(IOptions<TaskManagementOptions> taskManagementOptions, ITaskManager taskManager)
         {
-            get
-            {
-                // This property has a duplicate in the Storage layer in the PreviewProvider
-                // class. If you change this, please propagate changes there.
-
-                if ((_current == null) && (!_isInitialized))
-                {
-                    lock (_lock)
-                    {
-                        if ((_current == null) && (!_isInitialized))
-                        {
-                            try
-                            {
-                                _current = (DocumentPreviewProvider)TypeResolver.CreateInstance(Providers.DocumentPreviewProviderClassName);
-                            }
-                            catch (TypeNotFoundException) // rethrow
-                            {
-                                throw new ConfigurationErrorsException(string.Concat(SR.Exceptions.Configuration.Msg_DocumentPreviewProviderImplementationDoesNotExist, ": ", Providers.DocumentPreviewProviderClassName));
-                            }
-                            catch (InvalidCastException) // rethrow
-                            {
-                                throw new ConfigurationErrorsException(string.Concat(SR.Exceptions.Configuration.Msg_InvalidDocumentPreviewProviderImplementation, ": ", Providers.DocumentPreviewProviderClassName));
-                            }
-                            finally
-                            {
-                                _isInitialized = true;
-                            }
-
-                            if (_current == null)
-                                SnLog.WriteInformation("DocumentPreviewProvider not present.");
-                            else
-                                SnLog.WriteInformation("DocumentPreviewProvider created: " + _current.GetType().FullName, properties: new Dictionary<string, object>
-                                {
-                                    { "SupportedTaskNames", string.Join(", ", _current.GetSupportedTaskNames())}
-                                });
-                        }
-                    }
-                }
-                return _current;
-            }
+            TaskManagementOptions = taskManagementOptions?.Value ?? new TaskManagementOptions();
+            TaskManager = taskManager;
         }
+
 
         // ===================================================================================================== Helper methods
 
@@ -181,11 +157,11 @@ namespace SenseNet.Preview
         
         protected static string GetPreviewNameFromPageNumber(int page)
         {
-            return string.Format(Common.PREVIEW_IMAGENAME, page);
+            return string.Format(PREVIEW_IMAGENAME, page);
         }
         protected static string GetThumbnailNameFromPageNumber(int page)
         {
-            return string.Format(Common.THUMBNAIL_IMAGENAME, page);
+            return string.Format(THUMBNAIL_IMAGENAME, page);
         }
 
         protected static bool GetDisplayWatermarkQueryParameter()
@@ -208,8 +184,7 @@ namespace SenseNet.Preview
                 return null;
 
 
-            int rotation = 0;
-            if (!int.TryParse(paramVal, out rotation))
+            if (!int.TryParse(paramVal, out var rotation))
                 return null;
 
             // both positive and negative values are accepted
@@ -237,19 +212,20 @@ namespace SenseNet.Preview
                 return pageAttributes;
 
             // load the text field
-            var pageAttribFieldValue = content[FIELD_PAGEATTRIBUTES] as string;
-            if (string.IsNullOrEmpty(pageAttribFieldValue))
+            var pageAttributesFieldValue = content[FIELD_PAGEATTRIBUTES] as string;
+            if (string.IsNullOrEmpty(pageAttributesFieldValue))
                 return pageAttributes;
 
-            var pageAttribArray = JsonConvert.DeserializeObject(pageAttribFieldValue) as JArray;
-            foreach (dynamic pa in pageAttribArray)
-            {
-                pageAttributes.Add((int)pa.pageNum, pa.options as dynamic);
-            }
+            var pageAttributeArray = JsonConvert.DeserializeObject(pageAttributesFieldValue) as JArray;
+            if (pageAttributeArray == null)
+                return null;
+            foreach (dynamic pa in pageAttributeArray)
+                pageAttributes.Add((int) pa.pageNum, pa.options);
 
             return pageAttributes;
         }
 
+        //UNDONE:xxxDrawing: Remove System.Drawing features: ParseColor
         protected static System.Drawing.Color ParseColor(string color)
         {
             // rgba(0,0,0,1)
@@ -262,7 +238,7 @@ namespace SenseNet.Preview
             return System.Drawing.Color.FromArgb(Convert.ToInt32(colorVals[3]), Convert.ToInt32(colorVals[0]),
                                   Convert.ToInt32(colorVals[1]), Convert.ToInt32(colorVals[2]));
         }
-
+        //UNDONE:xxxDrawing: Remove System.Drawing features: ResizeImage
         protected static System.Drawing.Image ResizeImage(System.Drawing.Image image, int maxWidth, int maxHeight)
         {
             if (image == null)
@@ -282,7 +258,7 @@ namespace SenseNet.Preview
                 var newImage = new System.Drawing.Bitmap(newWidth, newHeight);
                 using (var graphicsHandle = System.Drawing.Graphics.FromImage(newImage))
                 {
-                    graphicsHandle.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                    graphicsHandle.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
                     graphicsHandle.DrawImage(image, 0, 0, newWidth, newHeight);
                 }
 
@@ -294,7 +270,7 @@ namespace SenseNet.Preview
                 return null;
             }
         }
-               
+        //UNDONE:xxxDrawing: Remove System.Drawing features: ComputeResizedDimensions
         protected static void ComputeResizedDimensions(int originalWidth, int originalHeight, int maxWidth, int maxHeight, out int newWidth, out int newHeight)
         {
             // do not scale up the image
@@ -315,7 +291,7 @@ namespace SenseNet.Preview
             newWidth = (int)(originalWidth * percent);
             newHeight = (int)(originalHeight * percent);
         }
-
+        //UNDONE:xxxDrawing: Remove System.Drawing features: ComputeResizedDimensionsWithRotation
         protected static void ComputeResizedDimensionsWithRotation(Image previewImage, int maxWidthHeight, int? rotation, out int newWidth, out int newHeight)
         {
             // Compute dimensions using a SQUARE (max width and height are equal). This way
@@ -348,10 +324,10 @@ namespace SenseNet.Preview
                         file.DisableObserver(TypeResolver.GetType(NodeObserverNames.NOTIFICATION, false));
 
                         file.KeepWorkflowsAlive();
-                        file.Save(SavingMode.KeepVersion);
+                        file.SaveAsync(SavingMode.KeepVersion, CancellationToken.None).GetAwaiter().GetResult();
                         return file;
                     },
-                    (result, iteration, exception) =>
+                    (_, _, exception) =>
                     {
                         // test
                         if (exception == null)
@@ -441,7 +417,7 @@ namespace SenseNet.Preview
 
         protected static IEnumerable<Node> QueryPreviewImages(string path)
         {
-            var previewType = ActiveSchema.NodeTypes[PREVIEWIMAGE_CONTENTTYPE];
+            var previewType = GetPreviewImageType();
             if (previewType == null)
                 return new Node[0];
 
@@ -470,12 +446,12 @@ namespace SenseNet.Preview
 
             for (var j = 0; j < numberOfLines; j++)
             {
-                blockHeight += info.DrawingContext.MeasureString(lines[j], info.Font).Height;
+                blockHeight += info.MeasureString(lines[j]).Height;
             }
 
             for (var j = 0; j < numberOfLines; j++)
             {
-                var currentLineSize = info.DrawingContext.MeasureString(lines[j], info.Font);
+                var currentLineSize = info.MeasureString(lines[j]);
                 var wx = -currentLineSize.Width / 2;
                 var wy = 0.0f;
 
@@ -487,11 +463,11 @@ namespace SenseNet.Preview
                         break;
                     case WatermarkPosition.Top:
                         wx = (info.Image.Width - currentLineSize.Width) / 2;
-                        wy = (currentLineSize.Height - info.Font.Size) * j;
+                        wy = currentLineSize.Height * (j + 1);
                         break;
                     case WatermarkPosition.Bottom:
                         wx = (info.Image.Width - currentLineSize.Width) / 2;
-                        wy = info.Image.Height - ((currentLineSize.Height - info.Font.Size) * (numberOfLines - j));
+                        wy = info.Image.Height - blockHeight + currentLineSize.Height * j;
                         break;
                     case WatermarkPosition.Center:
                         wx = (info.Image.Width - currentLineSize.Width) / 2;
@@ -499,7 +475,7 @@ namespace SenseNet.Preview
                         break;
                 }
 
-                info.DrawingContext.DrawString(lines[j], info.Font, new System.Drawing.SolidBrush(info.Color), wx, wy);
+                info.DrawingContext.DrawText(lines[j], new SKPoint(wx, wy), info.Paint);
             }
         }
 
@@ -575,8 +551,31 @@ namespace SenseNet.Preview
             return lines.AsEnumerable();
         }
 
+        private static NodeType GetPreviewImageType()
+        {
+            return Providers.Instance.StorageSchema.NodeTypes[PREVIEWIMAGE_CONTENTTYPE];
+        }
+
+
         // ===================================================================================================== Server-side interface
 
+        /// <summary>
+        /// General method that returns true if the preview can be generated for the given <see cref="Node"/>.
+        /// </summary>
+        /// <remarks>
+        /// This method takes the preview switch on the given content into account and if the feature is "on", calls
+        /// the provider specific <see cref="IsContentSupported"/> method in order to decide, whether the provider can
+        /// generate or not.
+        /// </remarks>
+        public bool IsPreviewEnabled(Node content)
+        {
+            var contentType = ContentType.GetByName(content.NodeType.Name);
+            return content.IsPreviewEnabled && contentType.Preview && IsContentSupported(content);
+        }
+
+        /// <summary>
+        /// Provider specific method that returns true if it can generate preview of the given <see cref="Node"/>.
+        /// </summary>
         public abstract bool IsContentSupported(Node content);
         public abstract string GetPreviewGeneratorTaskName(string contentPath);
         public abstract string GetPreviewGeneratorTaskTitle(string contentPath);
@@ -587,7 +586,7 @@ namespace SenseNet.Preview
             if (imageHead == null)
                 return false;
 
-            var previewType = ActiveSchema.NodeTypes[PREVIEWIMAGE_CONTENTTYPE];
+            var previewType = GetPreviewImageType();
             if (previewType == null)
                 return false;
 
@@ -601,7 +600,7 @@ namespace SenseNet.Preview
             if (image == null)
                 return false;
 
-            var previewType = ActiveSchema.NodeTypes[PREVIEWIMAGE_CONTENTTYPE];
+            var previewType = GetPreviewImageType();
             if (previewType == null)
                 return false;
 
@@ -633,21 +632,23 @@ namespace SenseNet.Preview
             // Here we assume that permissions are not broken on previews! This means the current user
             // has the same permissions (e.g. OpenMinor) on the preview image as on the document (if this 
             // is a false assumption, than we need to load the document itself and check OpenMinor on it).
-            return SecurityHandler.HasPermission(previewHead, PermissionType.OpenMinor);
+            return Providers.Instance.SecurityHandler.HasPermission(previewHead, PermissionType.OpenMinor);
         }
+
 
         public virtual RestrictionType GetRestrictionType(NodeHead nodeHead)
         {
+            var securityHandler = Providers.Instance.SecurityHandler;
             // if the lowest preview permission is not granted, the user has no access to the preview image
-            if (nodeHead == null || !SecurityHandler.HasPermission(nodeHead, PermissionType.Preview))
+            if (nodeHead == null || !securityHandler.HasPermission(nodeHead, PermissionType.Preview))
                 return RestrictionType.NoAccess;
 
             // has Open permission: means no restriction
-            if (SecurityHandler.HasPermission(nodeHead, PermissionType.Open))
+            if (securityHandler.HasPermission(nodeHead, PermissionType.Open))
                 return RestrictionType.NoRestriction;
 
-            var seeWithoutRedaction = SecurityHandler.HasPermission(nodeHead, PermissionType.PreviewWithoutRedaction);
-            var seeWithoutWatermark = SecurityHandler.HasPermission(nodeHead, PermissionType.PreviewWithoutWatermark);
+            var seeWithoutRedaction = securityHandler.HasPermission(nodeHead, PermissionType.PreviewWithoutRedaction);
+            var seeWithoutWatermark = securityHandler.HasPermission(nodeHead, PermissionType.PreviewWithoutWatermark);
 
             // both restrictions should be applied
             if (!seeWithoutRedaction && !seeWithoutWatermark)
@@ -669,20 +670,23 @@ namespace SenseNet.Preview
 
             var pc = (int)content["PageCount"];
 
-            while (pc == (int)PreviewStatus.InProgress || pc == (int)PreviewStatus.Postponed)
+            if (content.ContentHandler.IsPreviewEnabled && content.ContentType.Preview)
             {
-                // Create task if it does not exists. Otherwise page count will not be calculated.
-                StartPreviewGenerationInternal(content.ContentHandler, priority: TaskPriority.Immediately);
+                while (pc == (int) PreviewStatus.InProgress || pc == (int) PreviewStatus.Postponed)
+                {
+                    // Create task if it does not exists. Otherwise page count will not be calculated.
+                    StartPreviewGenerationInternal(content.ContentHandler, priority: TaskPriority.Immediately);
 
-                Thread.Sleep(4000);
+                    Thread.Sleep(4000);
 
-                AssertResultIsStillRequired();
+                    AssertResultIsStillRequired();
 
-                content = Content.Load(content.Id);
-                if (content == null)
-                    throw new PreviewNotAvailableException("Content deleted.", -1, 0);
+                    content = Content.Load(content.Id);
+                    if (content == null)
+                        throw new PreviewNotAvailableException("Content deleted.", -1, 0);
 
-                pc = (int)content["PageCount"];
+                    pc = (int) content["PageCount"];
+                }
             }
 
             var previewPath = RepositoryPath.Combine(content.Path, PREVIEWS_FOLDERNAME, GetPreviewsSubfolderName(content.ContentHandler));
@@ -749,6 +753,7 @@ namespace SenseNet.Preview
             {
                 case PreviewStatus.Postponed:
                 case PreviewStatus.InProgress:
+                // ReSharper disable once UnreachableSwitchCaseDueToIntegerAnalysis
                 case PreviewStatus.Ready:
                     return true;
                 default:
@@ -784,7 +789,8 @@ namespace SenseNet.Preview
                 if (img != null)
                     return img;
 
-                StartPreviewGenerationInternal(file, page - 1, TaskPriority.Immediately);
+                if (file.IsPreviewEnabled && content.ContentType.Preview)
+                    StartPreviewGenerationInternal(file, page - 1, TaskPriority.Immediately);
             }
 
             return null;
@@ -806,15 +812,10 @@ namespace SenseNet.Preview
 
             // we need to reload the image in elevated mode to have access to its properties
             if (previewImage.IsHeadOnly)
-            {
                 using (new SystemAccount())
-                {
                     previewImage = Node.Load<Image>(image.Id);
-                }
-            }
 
-            if (options == null)
-                options = new PreviewImageOptions();
+            options ??= new PreviewImageOptions();
 
             BinaryData binaryData = null;
 
@@ -825,20 +826,26 @@ namespace SenseNet.Preview
                     binaryData = previewImage.GetBinary(property);
             }
 
-            if (binaryData == null)
-                binaryData = previewImage.Binary;
+            binaryData ??= previewImage.Binary;
 
             // if the image is not a preview, return the requested binary without changes
-            if (!IsPreviewOrThumbnailImage(NodeHead.Get(previewImage.Id)))
+            var isPreviewOrThumbnailImage = IsPreviewOrThumbnailImage(NodeHead.Get(previewImage.Id));
+            if (!isPreviewOrThumbnailImage)
                 return binaryData.GetStream();
 
             var isThumbnail = IsThumbnailImage(previewImage);
 
             // check restriction type
             var previewHead = NodeHead.Get(previewImage.Id);
-            var rt = options.RestrictionType.HasValue ? options.RestrictionType.Value : GetRestrictionType(previewHead);
-            var displayRedaction = (rt & RestrictionType.Redaction) == RestrictionType.Redaction;
-            var displayWatermark = (rt & RestrictionType.Watermark) == RestrictionType.Watermark || GetDisplayWatermarkQueryParameter();
+            var restriction = GetRestrictionType(previewHead);
+            if (options.RestrictionType.HasValue)
+                restriction |= options.RestrictionType.Value;
+
+            var displayRedaction = restriction.HasFlag(RestrictionType.Redaction) || 
+                                   restriction.HasFlag(RestrictionType.NoAccess);
+            var displayWatermark = restriction.HasFlag(RestrictionType.Watermark) || 
+                                   restriction.HasFlag(RestrictionType.NoAccess) ||
+                                   GetDisplayWatermarkQueryParameter();
 
             // check watermark master switch in settings
             if (!Settings.GetValue(DOCUMENTPREVIEW_SETTINGS, WATERMARK_ENABLED, image.Path, true))
@@ -868,72 +875,21 @@ namespace SenseNet.Preview
                 return binaryData.GetStream();
 
             // return a memory stream containing the new image
-            var ms = new IO.MemoryStream();
+            var outputStream = new IO.MemoryStream();
 
-            using (var img = System.Drawing.Image.FromStream(binaryData.GetStream()))
+            // Do not use "using" statement here, because the "bitmap" is changed in the safe block.
+            var bitmap = SKBitmap.Decode(binaryData.GetStream());
+            try
             {
                 // draw redaction before rotating the image, because redaction rectangles
                 // are defined in the coordinating system of the original image
                 if (displayRedaction && !string.IsNullOrEmpty(shapes))
                 {
-                    using (var g = System.Drawing.Graphics.FromImage(img))
+                    var temporaryBitmap = Redaction(document, previewImage, isThumbnail, bitmap, shapes);
+                    if(!ReferenceEquals(temporaryBitmap, bitmap))
                     {
-                        var imageIndex = GetPreviewImagePageIndex(previewImage);
-                        var settings = new JsonSerializerSettings();
-                        var serializer = JsonSerializer.Create(settings);
-                        var jreader = new JsonTextReader(new IO.StringReader(shapes));
-                        var shapeCollection = (JArray)serializer.Deserialize(jreader);
-                        var redactions = shapeCollection[0]["redactions"].Where(jt => (int)jt["imageIndex"] == imageIndex).ToList();
-
-                        var realWidthRatio = THUMBNAIL_PREVIEW_WIDTH_RATIO;
-                        var realHeightRatio = THUMBNAIL_PREVIEW_HEIGHT_RATIO;
-
-                        if (redactions.Any() && isThumbnail)
-                        {
-                            // If this is a thumbnail, we will need the real preview image to determine 
-                            // the page width and height ratios to draw redactions to the correct place.
-                            var pi = GetPreviewImage(Content.Create(document), imageIndex);
-
-                            if (pi != null)
-                            {
-                                // Compute the exact position of the shape based on the size ratio of 
-                                // the real preview image and this thumbnail. 
-                                realWidthRatio = (float)img.Width / (float)pi.Width;
-                                realHeightRatio = (float)img.Height / (float)pi.Height;
-                            }
-                            else
-                            {
-                                // We could not find the main preview image that this thumbnail is 
-                                // related to (maybe because it is not generated yet). Use the old 
-                                // inaccurate algorithm (that builds on the default image ratios) 
-                                // as a workaround.
-                            }
-                        }
-
-                        foreach (var redaction in redactions)
-                        {
-                            var color = System.Drawing.Color.Black;
-                            var shapeBrush = new System.Drawing.SolidBrush(color);
-                            var shapeRectangle = new System.Drawing.Rectangle(redaction["x"].Value<int>(), redaction["y"].Value<int>(),
-                                                            redaction["w"].Value<int>(), redaction["h"].Value<int>());
-
-                            // there could be negative coordinates in the db, correct them here
-                            NormalizeRectangle(ref shapeRectangle);
-
-                            // convert shape to thumbnail size if needed
-                            if (isThumbnail)
-                            {
-                                shapeRectangle = new System.Drawing.Rectangle(
-                                    (int)Math.Round(shapeRectangle.X * realWidthRatio),
-                                    (int)Math.Round(shapeRectangle.Y * realHeightRatio),
-                                    (int)Math.Round(shapeRectangle.Width * realWidthRatio),
-                                    (int)Math.Round(shapeRectangle.Height * realHeightRatio));
-                            }
-
-                            g.FillRectangle(shapeBrush, shapeRectangle);
-                        }
-
-                        g.Save();
+                        bitmap.Dispose();
+                        bitmap = temporaryBitmap;
                     }
                 }
 
@@ -941,127 +897,245 @@ namespace SenseNet.Preview
                 // faster than using the Graphics object to rotate the image.
                 if (rotation.HasValue)
                 {
-                    switch (rotation)
+                    var temporaryBitmap = Rotate(bitmap, rotation.Value);
+                    if (!ReferenceEquals(temporaryBitmap, bitmap))
                     {
-                        case 90:
-                        case -270:
-                            img.RotateFlip(System.Drawing.RotateFlipType.Rotate90FlipNone);
-                            break;
-                        case 180:
-                        case -180:
-                            img.RotateFlip(System.Drawing.RotateFlipType.Rotate180FlipNone);
-                            break;
-                        case 270:
-                        case -90:
-                            img.RotateFlip(System.Drawing.RotateFlipType.Rotate270FlipNone);
-                            break;
+                        bitmap.Dispose();
+                        bitmap = temporaryBitmap;
                     }
                 }
 
                 // draw watermark
                 if (displayWatermark && !string.IsNullOrEmpty(watermark))
                 {
-                    using (var g = System.Drawing.Graphics.FromImage(img))
+                    watermark = TemplateManager.Replace(typeof(WatermarkTemplateReplacer), watermark,
+                        new[] {document, image});
+
+                    var fontName = Settings.GetValue<string>(DOCUMENTPREVIEW_SETTINGS, WATERMARK_FONT, image.Path) ??
+                                   "Microsoft Sans Serif";
+                    var weight = SKFontStyleWeight.Normal;
+                    if (Settings.GetValue(DOCUMENTPREVIEW_SETTINGS, WATERMARK_BOLD, image.Path, true))
+                        weight = SKFontStyleWeight.Bold;
+                    var slant = SKFontStyleSlant.Upright;
+                    if (Settings.GetValue(DOCUMENTPREVIEW_SETTINGS, WATERMARK_ITALIC, image.Path, false))
+                        slant = SKFontStyleSlant.Italic;
+
+                    var size = Settings.GetValue(DOCUMENTPREVIEW_SETTINGS, WATERMARK_FONTSIZE, image.Path, 72.0f);
+                    if (isThumbnail)
+                        size *= THUMBNAIL_PREVIEW_WIDTH_RATIO;
+
+                    var position = Settings.GetValue(DOCUMENTPREVIEW_SETTINGS, WATERMARK_POSITION, image.Path,
+                        WatermarkPosition.BottomLeftToUpperRight);
+
+                    var color = GetWatermarkColor(image.Path);
+
+                    var typeFace = SKTypeface.FromFamilyName(fontName, weight, SKFontStyleWidth.Normal, slant);
+                    var paint = new SKPaint
                     {
-                        watermark = TemplateManager.Replace(typeof(WatermarkTemplateReplacer), watermark, new[] { document, image });
+                        Typeface = typeFace,
+                        TextSize = size,
+                        IsAntialias = true,
+                        Color = color
+                    };
+                    var font = new SKFont(typeFace, size);
 
-                        var fontName = Settings.GetValue<string>(DOCUMENTPREVIEW_SETTINGS, WATERMARK_FONT, image.Path) ?? "Microsoft Sans Serif";
-                        var fs = System.Drawing.FontStyle.Regular;
-                        if (Settings.GetValue(DOCUMENTPREVIEW_SETTINGS, WATERMARK_BOLD, image.Path, true))
-                            fs = fs | System.Drawing.FontStyle.Bold;
-                        if (Settings.GetValue(DOCUMENTPREVIEW_SETTINGS, WATERMARK_ITALIC, image.Path, false))
-                            fs = fs | System.Drawing.FontStyle.Italic;
+                    var wmInfo = new WatermarkDrawingInfo(bitmap, new SKCanvas(bitmap), paint)
+                    {
+                        WatermarkText = watermark,
+                        Font = font,
+                        Color = color,
+                        Position = position
+                    };
 
-                        var size = Settings.GetValue(DOCUMENTPREVIEW_SETTINGS, WATERMARK_FONTSIZE, image.Path, 72.0f);
+                    DrawWatermark(wmInfo);
+                }
 
-                        // resize font in case of thumbnails
-                        if (isThumbnail)
-                            size = size * THUMBNAIL_PREVIEW_WIDTH_RATIO;
-
-                        var font = new System.Drawing.Font(fontName, size, fs);
-                        var position = Settings.GetValue(DOCUMENTPREVIEW_SETTINGS, WATERMARK_POSITION, image.Path, WatermarkPosition.BottomLeftToUpperRight);
-                        var color = GetWatermarkColor(image.Path);
-
-                        var wmInfo = new WatermarkDrawingInfo(img, g)
-                        {
-                            WatermarkText = watermark,
-                            Font = font,
-                            Color = color,
-                            Position = position
-                        };
-
-                        DrawWatermark(wmInfo);
-
-                        g.Save();
-                    }
-                }                               
-
-                ImageFormat imgFormat;
+                SKEncodedImageFormat imgFormat;
 
                 switch (IO.Path.GetExtension(previewImage.Path).ToLower())
                 {
                     case ".png":
-                        imgFormat = ImageFormat.Png;
+                        imgFormat = SKEncodedImageFormat.Png;
                         break;
                     case ".jpg":
                     case ".jpeg":
-                        imgFormat = ImageFormat.Jpeg;
+                        imgFormat = SKEncodedImageFormat.Jpeg;
                         break;
                     case ".bmp":
-                        imgFormat = ImageFormat.Bmp;
+                        imgFormat = SKEncodedImageFormat.Bmp;
                         break;
                     default:
                         throw new SnNotSupportedException("Unknown image preview type: " + previewImage.Path);
                 }
 
-                img.Save(ms, imgFormat);
+                var imageToSave = SKImage.FromBitmap(bitmap);
+                var data = imageToSave.Encode(imgFormat, 90);
+                data.SaveTo(outputStream);
+            }
+            finally
+            {
+                bitmap.Dispose();
             }
 
-            ms.Seek(0, IO.SeekOrigin.Begin);
-
-            return ms;
+            outputStream.Seek(0, IO.SeekOrigin.Begin);
+            return outputStream;
         }
 
-        private static System.Drawing.Color GetWatermarkColor(string contentPath = null)
+        private SKBitmap Redaction(File document, Image previewImage, bool isThumbnail, SKBitmap bitmap, string shapes)
+        {
+            using (var canvas = new SKCanvas(bitmap))
+            {
+                var imageIndex = GetPreviewImagePageIndex(previewImage);
+                var settings = new JsonSerializerSettings();
+                var serializer = JsonSerializer.Create(settings);
+                var jReader = new JsonTextReader(new IO.StringReader(shapes));
+                var shapeCollection = (JArray)serializer.Deserialize(jReader);
+                if (shapeCollection == null)
+                    return bitmap;
+                if (!shapeCollection.Any())
+                    return bitmap;
+                var redactionsToken = shapeCollection[0]["redactions"];
+                if(redactionsToken == null)
+                    return bitmap;
+                var redactions = redactionsToken.Where(jt => (int)jt["imageIndex"] == imageIndex).ToList();
+
+                var realWidthRatio = THUMBNAIL_PREVIEW_WIDTH_RATIO;
+                var realHeightRatio = THUMBNAIL_PREVIEW_HEIGHT_RATIO;
+
+                if (redactions.Any() && isThumbnail)
+                {
+                    // If this is a thumbnail, we will need the real preview image to determine 
+                    // the page width and height ratios to draw redactions to the correct place.
+                    var pi = GetPreviewImage(Content.Create(document), imageIndex);
+
+                    if (pi != null)
+                    {
+                        // Compute the exact position of the shape based on the size ratio of 
+                        // the real preview image and this thumbnail. 
+                        realWidthRatio = (float)bitmap.Width / (float)pi.Width;
+                        realHeightRatio = (float)bitmap.Height / (float)pi.Height;
+                    }
+                    else
+                    {
+                        // We could not find the main preview image that this thumbnail is 
+                        // related to (maybe because it is not generated yet). Use the old 
+                        // inaccurate algorithm (that builds on the default image ratios) 
+                        // as a workaround.
+                    }
+                }
+
+                foreach (var redaction in redactions)
+                {
+                    var color = SKColors.Black;
+                    var shapeBrush = new SKPaint {IsAntialias = true, Color = color};
+                    var x = redaction["x"]?.Value<int>() ?? 0;
+                    var y = redaction["y"]?.Value<int>() ?? 0;
+                    var w = redaction["w"]?.Value<int>() ?? 0;
+                    var h = redaction["h"]?.Value<int>() ?? 0;
+
+                    // there could be negative coordinates in the db, correct them here
+                    NormalizeRectangle(ref x, ref y, ref w, ref h);
+
+                    var shapeRectangle = new SKRectI(x, y, x + w, y + h);
+
+                    // convert shape to thumbnail size if needed
+                    if (isThumbnail)
+                    {
+                        shapeRectangle = new SKRectI(
+                            (int)Math.Round(shapeRectangle.Top * realWidthRatio),
+                            (int)Math.Round(shapeRectangle.Bottom * realHeightRatio),
+                            (int)Math.Round(shapeRectangle.Width * realWidthRatio),
+                            (int)Math.Round(shapeRectangle.Height * realHeightRatio));
+                    }
+
+                    canvas.DrawRect(shapeRectangle, shapeBrush);
+                }
+
+                canvas.Save();
+            }
+
+            return bitmap;
+        }
+
+        private SKBitmap Rotate(SKBitmap bitmap, int rotation)
+        {
+            SKBitmap rotated;
+            SKCanvas canvas;
+            switch (rotation)
+            {
+                case 90:
+                case -270:
+                    rotated = new SKBitmap(bitmap.Height, bitmap.Width);
+                    canvas = new SKCanvas(rotated);
+                    canvas.RotateDegrees(90);
+                    canvas.DrawBitmap(bitmap, 0, -bitmap.Height);
+                    break;
+                case 180:
+                case -180:
+                    rotated = new SKBitmap(bitmap.Width, bitmap.Height);
+                    canvas = new SKCanvas(rotated);
+                    canvas.RotateDegrees(180);
+                    canvas.DrawBitmap(bitmap, -bitmap.Width, -bitmap.Height);
+                    break;
+                case 270:
+                case -90:
+                    rotated = new SKBitmap(bitmap.Height, bitmap.Width);
+                    canvas = new SKCanvas(rotated);
+                    canvas.RotateDegrees(270);
+                    canvas.DrawBitmap(bitmap, -bitmap.Width, 0);
+                    break;
+                default:
+                    rotated = new SKBitmap(bitmap.Width, bitmap.Height);
+                    canvas = new SKCanvas(rotated);
+                    canvas.DrawBitmap(bitmap, 0, 0);
+                    break;
+            }
+
+            canvas.Dispose();
+            return rotated;
+        }
+
+        internal static SKColor GetWatermarkColor(string contentPath = null)
         {
             var alpha = Settings.GetValue(DOCUMENTPREVIEW_SETTINGS, WATERMARK_OPACITY, contentPath, 50);
-            var colorName = Settings.GetValue(DOCUMENTPREVIEW_SETTINGS, WATERMARK_COLOR, contentPath, "Black");
+            alpha = Math.Max(0, Math.Min(0xFF, alpha));
 
-            var color = System.Drawing.Color.Black;
+            var colorName = Settings.GetValue(DOCUMENTPREVIEW_SETTINGS, WATERMARK_COLOR, contentPath, "Black");
+            var color = SKColors.Black;
 
             try
             {
-                color = System.Drawing.ColorTranslator.FromHtml(colorName);
+                color = ColorField.ColorFromString(colorName);
             }
             catch (Exception e)
             {
                 SnLog.WriteWarning($"Document preview provider: watermark color {colorName} for {contentPath} could not be converted to a color object. {e.Message}");
             }
 
-            return System.Drawing.Color.FromArgb(alpha, color);
+            return new SKColor(color.Red, color.Green, color.Blue, Convert.ToByte(alpha));
         }
 
-        private static void NormalizeRectangle(ref System.Drawing.Rectangle shapeRectangle)
+        private static void NormalizeRectangle(ref int x, ref int y, ref int w, ref int h)
         {
             // This methods recalculates rectangle coordinates if it has negative numbers 
             // as a height or width (because it was drawn backwards).
 
             // normalize width and X
-            var pos = shapeRectangle.X;
-            var delta = shapeRectangle.Width;
+            var pos = x;
+            var delta = w;
             if (NormalizeCoordinates(ref pos, ref delta))
             {
-                shapeRectangle.X = pos;
-                shapeRectangle.Width = delta;
+                x = pos;
+                w = delta;
             }
 
             // normalize height and Y
-            pos = shapeRectangle.Y;
-            delta = shapeRectangle.Height;
+            pos = y;
+            delta = h;
             if (NormalizeCoordinates(ref pos, ref delta))
             {
-                shapeRectangle.Y = pos;
-                shapeRectangle.Height = delta;
+                y = pos;
+                h = delta;
             }
         }
 
@@ -1082,21 +1156,22 @@ namespace SenseNet.Preview
             if (string.IsNullOrEmpty(info.WatermarkText)) 
                 return;
 
-            var textSize = info.DrawingContext.MeasureString(info.WatermarkText, info.Font);
+            var textSize = info.MeasureString(info.WatermarkText);
             var charCount = info.WatermarkText.Length;
             var charSize = textSize.Width / charCount;
             double maxTextWithOnImage = 0;
 
+            info.DrawingContext.Save();
             switch (info.Position)
             {
                 case WatermarkPosition.BottomLeftToUpperRight:
-                    info.DrawingContext.TranslateTransform(info.Image.Width / 2.0f, info.Image.Height / 2.0f);
-                    info.DrawingContext.RotateTransform(-45);
+                    info.DrawingContext.Translate(info.Image.Width / 2.0f, info.Image.Height / 2.0f);
+                    info.DrawingContext.RotateDegrees(-45);
                     maxTextWithOnImage = Math.Sqrt((info.Image.Width * info.Image.Width) + (info.Image.Height * info.Image.Height)) * 0.7;
                     break;
                 case WatermarkPosition.UpperLeftToBottomRight:
-                    info.DrawingContext.TranslateTransform(info.Image.Width / 2.0f, info.Image.Height / 2.0f);
-                    info.DrawingContext.RotateTransform(45);
+                    info.DrawingContext.Translate(info.Image.Width / 2.0f, info.Image.Height / 2.0f);
+                    info.DrawingContext.RotateDegrees(45);
                     maxTextWithOnImage = Math.Sqrt((info.Image.Width * info.Image.Width) + (info.Image.Height * info.Image.Height)) * 0.7;
                     break;
                 case WatermarkPosition.Top:
@@ -1109,13 +1184,15 @@ namespace SenseNet.Preview
                     maxTextWithOnImage = info.Image.Width;
                     break;
                 default:
-                    info.DrawingContext.RotateTransform(45);
+                    info.DrawingContext.RotateDegrees(45);
                     break;
             }
 
             var lines = BreakTextIntoLines(info, maxTextWithOnImage, charSize).ToList();
 
             DrawLines(lines, info);
+            
+            info.DrawingContext.Restore();
         }
 
         public IO.Stream GetPreviewImagesDocumentStream(Content content, DocumentFormat? documentFormat = null, RestrictionType? restrictionType = null)
@@ -1171,7 +1248,7 @@ namespace SenseNet.Preview
 
                         previewsFolder.DisableObserver(TypeResolver.GetType(NodeObserverNames.NOTIFICATION, false));
                         previewsFolder.DisableObserver(TypeResolver.GetType(NodeObserverNames.WORKFLOWNOTIFICATION, false));
-                        previewsFolder.Save();
+                        previewsFolder.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                     }
                     catch (NodeAlreadyExistsException)
                     {
@@ -1193,7 +1270,7 @@ namespace SenseNet.Preview
                     // if the caller wanted to re-create the folder (for cleanup reasons), we need to delete it first
                     previewsSubfolder.DisableObserver(TypeResolver.GetType(NodeObserverNames.NOTIFICATION, false));
                     previewsSubfolder.DisableObserver(TypeResolver.GetType(NodeObserverNames.WORKFLOWNOTIFICATION, false));
-                    previewsSubfolder.ForceDelete();
+                    previewsSubfolder.ForceDeleteAsync(CancellationToken.None).ConfigureAwait(false).GetAwaiter().GetResult();
                     previewsSubfolder = null;
                 }
 
@@ -1204,7 +1281,7 @@ namespace SenseNet.Preview
                         previewsSubfolder = new SystemFolder(previewsFolder) {Name = previewSubfolderName};
                         previewsSubfolder.DisableObserver(TypeResolver.GetType(NodeObserverNames.NOTIFICATION, false));
                         previewsSubfolder.DisableObserver(TypeResolver.GetType(NodeObserverNames.WORKFLOWNOTIFICATION, false));
-                        previewsSubfolder.Save();
+                        previewsSubfolder.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                     }
                     catch (NodeAlreadyExistsException)
                     {
@@ -1229,12 +1306,12 @@ namespace SenseNet.Preview
                 var type = previews.NodeType.Name;
 
                 previews.DisableObserver(TypeResolver.GetType(NodeObserverNames.NOTIFICATION, false));
-                previews.ForceDelete();
+                previews.ForceDeleteAsync(CancellationToken.None).ConfigureAwait(false).GetAwaiter().GetResult();
 
                 var content = Content.CreateNew(type, parent, name);
                 content.ContentHandler.DisableObserver(TypeResolver.GetType(NodeObserverNames.NOTIFICATION, false));
                 content.ContentHandler.DisableObserver(TypeResolver.GetType(NodeObserverNames.WORKFLOWNOTIFICATION, false));
-                content.Save();
+                content.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
 
                 return Node.LoadNode(content.Id);
             }
@@ -1266,7 +1343,7 @@ namespace SenseNet.Preview
                 return false;
 
             // collect all preview and thumbnail images
-            var previewType = NodeType.GetByName(PREVIEWIMAGE_CONTENTTYPE);
+            var previewType = GetPreviewImageType();
             if (previewType == null)
                 return false;
 
@@ -1327,7 +1404,7 @@ namespace SenseNet.Preview
                         {
                             // existence check to avoid exceptions
                             if (Node.Exists(previewsPath))
-                                Node.ForceDelete(previewsPath);
+                                Node.ForceDeleteAsync(previewsPath, CancellationToken.None).ConfigureAwait(false).GetAwaiter().GetResult();
                         }
                         catch (Exception ex)
                         {
@@ -1351,7 +1428,14 @@ namespace SenseNet.Preview
 
         protected virtual string GetTaskApplicationId(Content content)
         {
-            return Settings.GetValue(SnTaskManager.Settings.SETTINGSNAME, SnTaskManager.Settings.TASKMANAGEMENTAPPID, content.Path, "SenseNet");
+            return TaskManagementOptions.GetApplicationIdOrSetting();
+        }
+        /// <summary>
+        /// Legacy providers may customize this to determine where to send task requests.
+        /// </summary>
+        protected virtual string GetTaskApplicationUrl(Content content)
+        {
+            return TaskManagementOptions.GetApplicationUrlOrSetting();
         }
 
         // ===================================================================================================== Static access
@@ -1363,18 +1447,26 @@ namespace SenseNet.Preview
                 return;
 
             // check if the feature is enabled on the content type
-            var content = Content.Create(node);
-            if (!content.ContentType.Preview)
+            var typeName = node?.NodeType?.Name;
+
+            // it is possible that the node type is not available yet (e.g. during installation)
+            if (typeName == null)
+                return;
+
+            var contentType = ContentType.GetByName(typeName);
+            if (!(contentType?.Preview ?? false))
                 return;
 
             // check if content is supported by the provider. if not, don't bother starting the preview generation)
             if (!previewProvider.IsContentSupported(node) || previewProvider.IsPreviewOrThumbnailImage(NodeHead.Get(node.Id)))
                 DocumentPreviewProvider.SetPreviewStatusWithoutSave(node as File, PreviewStatus.NotSupported);
+            else if (!node.IsPreviewEnabled)
+                DocumentPreviewProvider.SetPreviewStatusWithoutSave(node as File, PreviewStatus.Postponed);
         }
 
         public static void StartPreviewGeneration(Node node, TaskPriority priority = TaskPriority.Normal)
         {
-            var previewProvider = DocumentPreviewProvider.Current;
+            var previewProvider = Current;
             if (previewProvider == null)
                 return;
 
@@ -1384,17 +1476,22 @@ namespace SenseNet.Preview
                 return;
 
             // check if content is supported by the provider. if not, don't bother starting the preview generation)
-            if (!previewProvider.IsContentSupported(node) || previewProvider.IsPreviewOrThumbnailImage(NodeHead.Get(node.Id)))
+            if (!previewProvider.IsPreviewEnabled(node) || previewProvider.IsPreviewOrThumbnailImage(NodeHead.Get(node.Id)))
                 return;
 
-            DocumentPreviewProvider.StartPreviewGenerationInternal(node, priority: priority);
+            previewProvider.StartPreviewGenerationInternal(node, priority: priority);
         }
 
-        private static void StartPreviewGenerationInternal(Node relatedContent, int startIndex = 0, TaskPriority priority = TaskPriority.Normal)
+        private void StartPreviewGenerationInternal(Node relatedContent, int startIndex = 0, TaskPriority priority = TaskPriority.Normal)
         {
-            if (DocumentPreviewProvider.Current == null || DocumentPreviewProvider.Current is DefaultDocumentPreviewProvider)
+            if (this is DefaultDocumentPreviewProvider)
             {
-                SnTrace.System.Write("Preview image generation is available only in the enterprise edition. No document preview provider is present.");
+                SnTrace.System.Write("Preview image generation is not available in this edition. No document preview provider is present.");
+                return;
+            }
+            if (TaskManager == null)
+            {
+                SnTrace.System.Write("Preview image generation is not available: no task manager is present.");
                 return;
             }
 
@@ -1402,9 +1499,7 @@ namespace SenseNet.Preview
             var content = Content.Create(relatedContent);
             var maxPreviewCount = Settings.GetValue(DOCUMENTPREVIEW_SETTINGS, MAXPREVIEWCOUNT, relatedContent.Path, 10);
             var roundedStartIndex = startIndex - startIndex % maxPreviewCount;
-            var communicationUrl = Settings.GetValue(SnTaskManager.Settings.SETTINGSNAME, SnTaskManager.Settings.TASKMANAGEMENTAPPLICATIONURL,
-                relatedContent.Path,
-                CompatibilitySupport.Request_Url?.GetComponents(UriComponents.SchemeAndServer, UriFormat.Unescaped) ?? string.Empty);
+            var communicationUrl = GetTaskApplicationUrl(content);
 
             // serialize data for preview generator task (json format)
             var serializer = new JsonSerializer();
@@ -1429,17 +1524,17 @@ namespace SenseNet.Preview
                 previewData = sw.GetStringBuilder().ToString();
             }
             
-            var taskName = DocumentPreviewProvider.Current.GetPreviewGeneratorTaskName(relatedContent.Path);
+            var taskName = GetPreviewGeneratorTaskName(relatedContent.Path);
 
             var requestData = new RegisterTaskRequest
             {
                 Type = taskName,
-                Title = DocumentPreviewProvider.Current.GetPreviewGeneratorTaskTitle(relatedContent.Path),
+                Title = GetPreviewGeneratorTaskTitle(relatedContent.Path),
                 Priority = priority,
-                Tag = DocumentPreviewProvider.Current.GetTaskTag(content),
-                AppId = DocumentPreviewProvider.Current.GetTaskApplicationId(content),
+                Tag = GetTaskTag(content),
+                AppId = GetTaskApplicationId(content),
                 TaskData = previewData,
-                FinalizeUrl = DocumentPreviewProvider.Current.GetTaskFinalizeUrl(content)
+                FinalizeUrl = GetTaskFinalizeUrl(content)
             };
 
             // start generating previews only if there is a task type defined
@@ -1448,7 +1543,7 @@ namespace SenseNet.Preview
                 // Fire and forget: we do not need the result of the register operation.
                 // (we have to start a task here instead of calling RegisterTaskAsync 
                 // directly because the asp.net sync context callback would fail)
-                System.Threading.Tasks.Task.Run(() => SnTaskManager.RegisterTaskAsync(requestData));
+                System.Threading.Tasks.Task.Run(() => TaskManager.RegisterTaskAsync(requestData, CancellationToken.None));
             }
         }
 
@@ -1487,16 +1582,48 @@ namespace SenseNet.Preview
             file.PageCount = (int)status;
         }
 
-        // ===================================================================================================== OData interface
+        /* ========================================================================================== OData interface */
 
-        [ODataFunction]
+        /// <summary>Gets all preview images for a content. If any of the images are
+        /// missing or the page count is not yet determined, it starts preview
+        /// generation and waits for it to complete. This may last long in case
+        /// of a huge document.</summary>
+        /// <snCategory>Preview</snCategory>
+        /// <param name="content"></param>
+        /// <returns>The list of preview images. Thumbnail images are not included.</returns>
+        [ODataFunction("GetPreviewImages", Description = "$Action,GetPreviewImages")]
+        [ContentTypes(N.CT.File)]
+        [AllowedRoles(N.R.Everyone)]
+        [RequiredPermissions(N.P.Preview)]
         public static IEnumerable<Content> GetPreviewImagesForOData(Content content)
         {
             return Current != null ? Current.GetPreviewImages(content) : null;
         }
 
+        /// <summary>Gets the path and image dimensions of a specific preview page of a document.
+        /// If the page count for the content is available but the image does not exist, this
+        /// action will start preview generation in the background (but will not wait for it).
+        /// </summary>
+        /// <snCategory>Preview</snCategory>
+        /// <param name="content"></param>
+        /// <param name="page">A specific page number to check.</param>
+        /// <returns>A custom object containing image path and dimensions.
+        /// In case the image is not available yet, it will return a similar object with the
+        /// PreviewAvailable property set to null.
+        /// </returns>
+        /// <example>
+        /// <code>
+        /// {
+        ///    PreviewAvailable: "/Root/Content/DocLib/MyDoc.docx/Previews/1.0.A/preview1.png",
+        ///    Width: 500,
+        ///    Height: 800
+        /// }
+        /// </code>
+        /// </example>
         [ODataFunction]
-        public static object PreviewAvailable(Content content, int page)
+        [ContentTypes(N.CT.File)]
+        [AllowedRoles(N.R.Everyone)]
+        public static PreviewAvailableResponse PreviewAvailable(Content content, int page)
         {
             var thumb = Current != null ? Current.GetThumbnailImage(content, page) : null;
             if (thumb != null)
@@ -1504,7 +1631,7 @@ namespace SenseNet.Preview
                 var pi = Current != null ? Current.GetPreviewImage(content, page) : null;
                 if (pi != null)
                 {
-                    return new
+                    return new PreviewAvailableResponse
                     {
                         PreviewAvailable = pi.Path,
                         Width = (int)pi["Width"],
@@ -1513,15 +1640,51 @@ namespace SenseNet.Preview
                 }
             }
 
-            return new { PreviewAvailable = (string)null };
+            return new PreviewAvailableResponse { PreviewAvailable = (string)null };
         }
 
-        [ODataFunction]
-        public static IEnumerable<object> GetExistingPreviewImagesForOData(Content content)
+        public class PreviewAvailableResponse
+        {
+            public string PreviewAvailable { get; set; }
+            public int Width { get; set; }
+            public int Height { get; set; }
+        }
+
+        /// <summary>Gets path and dimension information for existing preview images.
+        /// This action will not start preview generation, only return a list
+        /// of consecutive preview images starting from the beginning.</summary>
+        /// <snCategory>Preview</snCategory>
+        /// <param name="content"></param>
+        /// <returns>
+        /// A list of custom objects containing path and dimensions of preview images.
+        /// Thumbnail images are not included.
+        /// </returns>
+        /// <example>
+        /// <code>
+        /// [
+        ///     {
+        ///         PreviewAvailable: "/Root/Content/DocLib/MyDoc.docx/Previews/1.0.A/preview1.png",
+        ///         Width: 500,
+        ///         Height: 800,
+        ///         Index: 1
+        ///     },
+        ///     {
+        ///         PreviewAvailable: "/Root/Content/DocLib/MyDoc.docx/Previews/1.0.A/preview2.png",
+        ///         Width: 500,
+        ///         Height: 800,
+        ///         Index: 2
+        ///     }
+        /// ]
+        /// </code>
+        /// </example>
+        [ODataFunction("GetExistingPreviewImages", Description = "$Action,GetExistingPreviewImages")]
+        [ContentTypes(N.CT.File)]
+        [AllowedRoles(N.R.Everyone)]
+        public static IEnumerable<GetExistingPreviewImagesResponse> GetExistingPreviewImagesForOData(Content content)
         {
             foreach (var image in DocumentPreviewProvider.Current.GetExistingPreviewImages(content))
             {
-                yield return new
+                yield return new GetExistingPreviewImagesResponse
                 {
                     PreviewAvailable = image.Path,
                     Width = (int)image["Width"],
@@ -1530,8 +1693,29 @@ namespace SenseNet.Preview
                 };
             }
         }
+        public class GetExistingPreviewImagesResponse : PreviewAvailableResponse
+        {
+            public int Index { get; set; }
+        }
 
-        [ODataAction]
+        /// <summary>Gets the number of preview pages of a document. If preview generation
+        /// is not yet started, this action will start the process in the background.</summary>
+        /// <snCategory>Preview</snCategory>
+        /// <remarks>
+        /// In case previews are not yet available or not possible to generate them, this value will contain one of the
+        /// following statuses:
+        /// - NoProvider: -5
+        /// - Postponed: -4
+        /// - Error: -3
+        /// - NotSupported: -2
+        /// - InProgress: -1
+        /// - EmptyDocument: 0
+        /// </remarks>
+        /// <param name="content"></param>
+        /// <returns>Page count of a document or a status code.</returns>
+        [ODataAction(Description = "Get page count")]
+        [ContentTypes(N.CT.File)]
+        [AllowedRoles(N.R.Everyone)]
         public static int GetPageCount(Content content)
         {
             var pageCount = (int)content["PageCount"];
@@ -1545,7 +1729,7 @@ namespace SenseNet.Preview
             {
                 if (pageCount == -4)
                 {
-                    // status is postponed --> set status to inprogress and start preview generation
+                    // status is postponed --> set status to in progress and start preview generation
                     SetPreviewStatus(file, PreviewStatus.InProgress);
 
                     pageCount = (int)PreviewStatus.InProgress;
@@ -1559,8 +1743,26 @@ namespace SenseNet.Preview
             return pageCount;
         }
 
-        [ODataAction]
-        public static object GetPreviewsFolder(Content content, bool empty)
+        /// <summary>Gets the id and path of the folder containing preview images
+        /// for the specified target version of a content.
+        /// Tha target version can be specified by the version url parameter. This
+        /// action does not generate preview images.</summary>
+        /// <snCategory>Preview</snCategory>
+        /// <param name="content"></param>
+        /// <param name="empty">True if the preview folder should be deleted and re-created.</param>
+        /// <returns>A response object containing the id and path of the folder.</returns>
+        /// <example>
+        /// <code>
+        /// {
+        ///     Id: 1234
+        ///     Path: "/Root/Content/DocLib/MyDoc.docx/Previews/1.0.A"
+        /// }
+        /// </code>
+        /// </example>
+        [ODataAction(Description = "Get previews folder")]
+        [ContentTypes(N.CT.File)]
+        [AllowedRoles(N.R.Everyone)]
+        public static GetPreviewsFolderResponse GetPreviewsFolder(Content content, bool empty)
         {
             if (content == null)
                 throw new ArgumentNullException("content");
@@ -1568,14 +1770,33 @@ namespace SenseNet.Preview
             // load, create or re-create the previews folder
             var previewsFolder = DocumentPreviewProvider.Current.GetPreviewsFolder(content.ContentHandler, empty);
 
-            return new
+            return new GetPreviewsFolderResponse
             {
                 Id = previewsFolder.Id,
                 Path = previewsFolder.Path
             };
         }
+        public class GetPreviewsFolderResponse
+        {
+            public int Id { get; set; }
+            public string Path { get; set; }
+        }
 
-        [ODataAction]
+        /// <summary>Sets the preview status if a document.
+        /// Available options are the following:
+        /// - NoProvider,
+        /// - Postponed,
+        /// - Error,
+        /// - NotSupported,
+        /// - InProgress,
+        /// - EmptyDocument
+        /// </summary>
+        /// <snCategory>Preview</snCategory>
+        /// <param name="content"></param>
+        /// <param name="status">Preview status value as a string.</param>
+        [ODataAction(Description = "Set preview status")]
+        [ContentTypes(N.CT.File)]
+        [AllowedRoles(N.R.Everyone)]
         public static void SetPreviewStatus(Content content, PreviewStatus status)
         {
             if (content == null)
@@ -1584,7 +1805,14 @@ namespace SenseNet.Preview
             SetPreviewStatus(content.ContentHandler as File, status);
         }
 
-        [ODataAction]
+        /// <summary>Sets the page count of the document.
+        /// This action does not generate preview images.</summary>
+        /// <snCategory>Preview</snCategory>
+        /// <param name="content"></param>
+        /// <param name="pageCount">Page count value</param>
+        [ODataAction(Description = "Set page count")]
+        [ContentTypes(N.CT.File)]
+        [AllowedRoles(N.R.Everyone)]
         public static void SetPageCount(Content content, int pageCount)
         {
             if (content == null)
@@ -1593,14 +1821,19 @@ namespace SenseNet.Preview
             SavePageCount(content.ContentHandler as File, pageCount);
         }
 
+        /// <summary>Sets the initial security-related properties (Owner, CreatedBy, etc.)
+        /// of a preview image automatically. The values come from the original document.</summary>
+        /// <snCategory>Preview</snCategory>
+        /// <param name="content"></param>
         [ODataAction]
+        [ContentTypes(N.CT.PreviewImage)]
+        [AllowedRoles(N.R.Everyone)]
         public static void SetInitialPreviewProperties(Content content)
         {
             if (content == null)
-                throw new ArgumentNullException("content");
+                throw new ArgumentNullException(nameof(content));
 
-            var previewImage = content.ContentHandler as Image;
-            if (previewImage == null)
+            if (!(content.ContentHandler is Image previewImage))
                 throw new InvalidOperationException("This content is not an image.");
 
             var document = GetDocumentForPreviewImage(NodeHead.Get(content.Id));
@@ -1618,30 +1851,71 @@ namespace SenseNet.Preview
             previewImage.VersionModifiedBy = realCreatorUser;
             previewImage.Index = DocumentPreviewProvider.Current.GetPreviewImagePageIndex(previewImage);
 
-            previewImage.Save(SavingMode.KeepVersion);
+            previewImage.SaveAsync(SavingMode.KeepVersion, CancellationToken.None).GetAwaiter().GetResult();
         }
 
-        [ODataAction]
-        public static void RegeneratePreviews(Content content)
+        /// <summary>Sets the preview status of the document to In progress
+        /// and starts generating preview images - regardless of existing images.</summary>
+        /// <snCategory>Preview</snCategory>
+        /// <param name="content"></param>
+        /// <returns>A response object containing the current page count (likely to be
+        /// -1 meaning In progress and 0 as the current preview count).</returns>
+        [ODataAction(Description = "Regenerate preview images")]
+        [ContentTypes(N.CT.File)]
+        [AllowedRoles(N.R.Everyone)]
+        public static RegeneratePreviewsResponse RegeneratePreviews(Content content)
         {
             if (content == null)
                 throw new ArgumentNullException("content");
 
             // Regardless of the current status, generate preview images again
-            // (e.g. because previously there was an error).
-            SetPreviewStatus(content.ContentHandler as File, PreviewStatus.InProgress);
-            StartPreviewGeneration(content.ContentHandler, TaskPriority.Immediately);
+            // (e.g. because previously there was an error) if the preview generation is enabled.
+            if (content.ContentHandler.IsPreviewEnabled && content.ContentType.Preview)
+            {
+                SetPreviewStatus(content.ContentHandler as File, PreviewStatus.InProgress);
+                StartPreviewGeneration(content.ContentHandler, TaskPriority.Immediately);
+            }
+            else
+            {
+                SetPreviewStatus(content.ContentHandler as File, PreviewStatus.Postponed);
+            }
+
+            // reload to make sure we have the latest value
+            var file = Node.Load<File>(content.Id);
+
+            return new RegeneratePreviewsResponse { PageCount = file.PageCount, PreviewCount = 0 };
+        }
+        public class RegeneratePreviewsResponse
+        {
+            public int PageCount { get; set; }
+            public int PreviewCount { get; set; }
         }
 
-        [ODataAction]
-        public static object CheckPreviews(Content content, bool generateMissing)
+        /// <summary>Checks the number of pages and preview images of a document.</summary>
+        /// <snCategory>Preview</snCategory>
+        /// <param name="content"></param>
+        /// <param name="generateMissing">True if preview image generation should start
+        /// in case images are missing.</param>
+        /// <returns>A custom object containing page and preview count.</returns>
+        /// <example>
+        /// <code>
+        /// {
+        ///     PageCount: 5,
+        ///     PreviewCount: 5
+        /// }
+        /// </code>
+        /// </example>
+        [ODataAction(Description = "Check preview images")]
+        [ContentTypes(N.CT.File)]
+        [AllowedRoles(N.R.Everyone)]
+        public static CheckPreviewsResponse CheckPreviews(Content content, bool generateMissing)
         {
             if (content == null)
                 throw new ArgumentNullException("content");
 
             var file = content.ContentHandler as File;
             if (file == null || !Current.IsContentSupported(file) || !Current.HasPreviewPermission(NodeHead.Get(content.Id)))
-                return new { PageCount = 0, PreviewCount = 0 };
+                return new CheckPreviewsResponse { PageCount = 0, PreviewCount = 0 };
 
             // the page count is unknown yet or never will be known
             if (file.PageCount < 1)
@@ -1656,13 +1930,13 @@ namespace SenseNet.Preview
                         break;
                 }
 
-                return new { file.PageCount, PreviewCount = 0 };
+                return new CheckPreviewsResponse { PageCount = file.PageCount, PreviewCount = 0 };
             }
 
             // check if there is a folder for preview images
             var previewsFolder = Current.GetPreviewsFolder(file);
             if (previewsFolder == null)
-                return new { file.PageCount, PreviewCount = 0 };
+                return new CheckPreviewsResponse { PageCount = file.PageCount, PreviewCount = 0 };
 
             // number of existing preview images
             var existingCount = QueryPreviewImages(previewsFolder.Path).Count(pi => pi.Index > 0);
@@ -1683,13 +1957,28 @@ namespace SenseNet.Preview
                 });
             }
 
-            return new { file.PageCount, PreviewCount = existingCount };
+            return new CheckPreviewsResponse { PageCount = file.PageCount, PreviewCount = existingCount };
         }
 
-        [ODataAction]
-        public static void DocumentPreviewFinalizer(Content content, SnTaskResult result)
+        public class CheckPreviewsResponse
         {
-            SnTaskManager.OnTaskFinished(result);
+            public int PageCount { get; set; }
+            public int PreviewCount { get; set; }
+        }
+
+        /// <summary>Finalizes a preview generation task for a document.
+        /// This action is intended for internal use by the Task Management
+        /// module.</summary>
+        /// <snCategory>Preview</snCategory>
+        /// <param name="content"></param>
+        /// <param name="context"></param>
+        /// <param name="result">Result of the preview generation task.</param>
+        [ODataAction]
+        [AllowedRoles(N.R.Everyone)]
+        public static async Task DocumentPreviewFinalizer(Content content, HttpContext context, SnTaskResult result)
+        {
+            await (context.RequestServices.GetRequiredService<ITaskManager>())
+                .OnTaskFinishedAsync(result, context.RequestAborted).ConfigureAwait(false);
 
             // not enough information
             if (result.Task == null || string.IsNullOrEmpty(result.Task.TaskData))
@@ -1717,8 +2006,14 @@ namespace SenseNet.Preview
         }        
     }
 
+    /// <summary>
+    /// Built-in preview provider that does not do anything. You cannot inherit from this class,
+    /// inherit from <see cref="DocumentPreviewProvider"/> instead.
+    /// </summary>
     public sealed class DefaultDocumentPreviewProvider : DocumentPreviewProvider
     {
+        public DefaultDocumentPreviewProvider() : base(null, null) { }
+
         public override string GetPreviewGeneratorTaskName(string contentPath)
         {
             return string.Empty;

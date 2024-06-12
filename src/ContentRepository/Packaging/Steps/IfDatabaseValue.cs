@@ -1,7 +1,11 @@
 ﻿using System;
-using System.Data;
 using System.IO;
+using System.Threading;
+using SenseNet.Configuration;
 using SenseNet.ContentRepository.Storage.Data;
+using SenseNet.ContentRepository.Storage.Data.MsSqlClient;
+using SenseNet.Diagnostics;
+using SenseNet.Tools;
 
 namespace SenseNet.Packaging.Steps
 {
@@ -35,64 +39,72 @@ namespace SenseNet.Packaging.Steps
 
         private bool ExecuteSql(string script, ExecutionContext context)
         {
-            using (var proc = CreateDataProcedure(script, context))
-            {
-                proc.CommandType = CommandType.Text;
-                object result;
-
-                try
-                {
-                    result = proc.ExecuteScalar();
-                }
-                catch (Exception ex)
-                {
-                    throw new PackagingException("Error during SQL script execution. " + ex);
-                }
-
-                if (result == null || Convert.IsDBNull(result))
-                    return false;
-
-                if (result is bool)
-                    return (bool)result;
-                if (result is byte)
-                    return (byte)result > 0;
-                if (result is decimal)
-                    return (decimal)result > 0;
-                if (result is double)
-                    return (double)result > 0;
-                if (result is float)
-                    return (float)result > 0;
-                if (result is int)
-                    return (int)result > 0;
-                if (result is long)
-                    return (long)result > 0;
-                if (result is sbyte)
-                    return (sbyte)result > 0;
-                if (result is short)
-                    return (short)result > 0;
-                if (result is uint)
-                    return (uint)result > 0;
-                if (result is ulong)
-                    return (ulong)result > 0;
-                if (result is ushort)
-                    return (ushort)result > 0;
-
-                if (result is string)
-                    return !string.IsNullOrEmpty((string) result);
-            }
-
-            return false;
+            using var op = SnTrace.Database.StartOperation(() => "IfDatabaseValue: " +
+                $"ExecuteSql: script: {script.ToTrace()}");
+            var result = Execute(script, context);
+            op.Successful = true;
+            return result;
         }
-
-        private IDataProcedure CreateDataProcedure(string script, ExecutionContext context)
+        private bool Execute(string script, ExecutionContext context)
         {
-            return DataProvider.Instance.CreateDataProcedure(script, new ConnectionInfo
+            var connectionInfo = new ConnectionInfo
             {
                 DataSource = (string)context.ResolveVariable(DataSource),
                 InitialCatalogName = (string)context.ResolveVariable(InitialCatalogName),
                 UserName = (string)context.ResolveVariable(UserName),
                 Password = (string)context.ResolveVariable(Password)
-            });
+            };
+            var connectionString = MsSqlDataContext.GetConnectionString(connectionInfo, context.ConnectionStrings)
+                                   ?? context.ConnectionStrings.Repository;
+
+            //TODO: [DIREF] get options from DI through constructor
+            using var ctx = new MsSqlDataContext(connectionString, DataOptions.GetLegacyConfiguration(),
+                GetService<IRetrier>(), CancellationToken.None);
+
+            object result;
+            try
+            {
+                result = ctx.ExecuteScalarAsync(script).GetAwaiter().GetResult();
+            }
+            catch (Exception ex)
+            {
+                throw new PackagingException("Error during SQL script execution. " + ex);
+            }
+
+            if (result == null || Convert.IsDBNull(result))
+                return false;
+
+            switch (result)
+            {
+                case bool @bool:
+                    return @bool;
+                case byte @byte:
+                    return @byte > 0;
+                case decimal @decimal:
+                    return @decimal > 0;
+                case double @double:
+                    return @double > 0;
+                case float @float:
+                    return @float > 0;
+                case int @int:
+                    return @int > 0;
+                case long @long:
+                    return @long > 0;
+                case sbyte @sbyte:
+                    return @sbyte > 0;
+                case short @short:
+                    return @short > 0;
+                case uint @uint:
+                    return @uint > 0;
+                case ulong @ulong:
+                    return @ulong > 0;
+                case ushort @ushort:
+                    return @ushort > 0;
+                case string @string:
+                    return !string.IsNullOrEmpty(@string);
+            }
+
+            return false;
         }
     }
 }

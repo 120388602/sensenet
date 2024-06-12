@@ -72,6 +72,12 @@ namespace SenseNet.ContentRepository.Storage.Security
                 {
                     try
                     {
+                        if (TypeResolver.GetType(tn, false) == null)
+                        {
+                            SnTrace.System.WriteError($"Membership extender type not found: {tn}");
+                            return null;
+                        }
+
                         return TypeResolver.CreateInstance<MembershipExtenderBase>(tn);
                     }
                     catch (Exception ex)
@@ -137,7 +143,7 @@ namespace SenseNet.ContentRepository.Storage.Security
         }
     }
 
-    internal static class MembershipUserExtensions
+    public static class MembershipUserExtensions
     {
         /// <summary>
         /// Adds identities to the extended membership list of the user. If the current

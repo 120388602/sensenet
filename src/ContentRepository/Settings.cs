@@ -13,13 +13,18 @@ using SenseNet.ContentRepository.Storage.Security;
 using SenseNet.Diagnostics;
 using SenseNet.Search;
 using System.Collections;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.AspNetCore.Http;
+using SenseNet.ApplicationModel;
 using SenseNet.Configuration;
 using SenseNet.ContentRepository.Json;
-using SenseNet.ContentRepository.Search;
 using SenseNet.ContentRepository.Search.Querying;
 using SenseNet.ContentRepository.Storage.Caching.Dependency;
 using SenseNet.ContentRepository.Storage.Data;
+using SenseNet.ContentRepository.Workspaces;
 using SenseNet.Search.Indexing;
+using STT = System.Threading.Tasks;
 // ReSharper disable ArrangeThisQualifier
 // ReSharper disable RedundantBaseQualifier
 // ReSharper disable InconsistentNaming
@@ -33,7 +38,7 @@ namespace SenseNet.ContentRepository
     /// stored in the Content Repository instead of a config file in the file system.
     /// </summary>
     [ContentHandler]
-    public class Settings : File, ISupportsDynamicFields, ISupportsAddingFieldsOnTheFly
+    public partial class Settings : File, ISupportsDynamicFields, ISupportsAddingFieldsOnTheFly
     {
         /// <summary>
         /// This class serves as an internal helper for providing settings feature to
@@ -235,8 +240,17 @@ namespace SenseNet.ContentRepository
             if (string.IsNullOrEmpty(settingsName))
                 throw new ArgumentNullException(nameof(settingsName));
 
-            return SettingsCache.GetSettingsByName<T>(settingsName, contextPath)
-                ?? Node.Load<T>(RepositoryPath.Combine(SETTINGSCONTAINERPATH, settingsName + "." + EXTENSION));
+            try
+            {
+                return SettingsCache.GetSettingsByName<T>(settingsName, contextPath)
+                       ?? Node.Load<T>(RepositoryPath.Combine(SETTINGSCONTAINERPATH, settingsName + "." + EXTENSION));
+            }
+            catch (Exception ex)
+            {
+                SnTrace.System.WriteError($"Error loading setting: {settingsName}. {ex.Message}");
+            }
+
+            return null;
         }
 
         /// <summary>
@@ -314,7 +328,7 @@ namespace SenseNet.ContentRepository
                 // file not found, even in the global folder
                 if (settingsFile == null)
                 {
-                    SnLog.WriteWarning("Settings file not found: " + settingsName + "." + EXTENSION);
+                    SnTrace.Event.Write("WARNING: Settings file not found: " + settingsName + "." + EXTENSION);
                     return defaultValue;
                 }
 
@@ -341,8 +355,12 @@ namespace SenseNet.ContentRepository
                     // NOTE: no need to add to cache here, we suppose that the content fields are already in the memory
                     //       (also, the dynamic fields of Settings are added to the cache in GetProperty)
 
-                    settingValue = ConvertSettingValue<T>(settingsContent[key], defaultValue);
-                    return (T)settingValue;
+                    var fieldValue = settingsContent[key];
+                    if (fieldValue != null)
+                    {
+                        settingValue = ConvertSettingValue<T>(fieldValue, defaultValue);
+                        return (T) settingValue;
+                    }
                 }
 
                 // if this is a local setting, try to find the value upwards
@@ -375,6 +393,32 @@ namespace SenseNet.ContentRepository
             var result = GetSettingsByName<Settings>(this.GetSettingName(), newPath);
             return result;
         }
+
+        private static readonly JsonMergeSettings MergeControl = new JsonMergeSettings
+        {
+            MergeArrayHandling = MergeArrayHandling.Replace,
+            MergeNullValueHandling = MergeNullValueHandling.Ignore,
+            PropertyNameComparison = StringComparison.InvariantCultureIgnoreCase
+        };
+        public static async Task<JObject> GetEffectiveValues(string settingsName, string contextPath, CancellationToken cancel)
+        {
+            var allSettings = SystemAccount.Execute<List<Settings>>(() => 
+                GetAllSettingsByName<Settings>(settingsName, contextPath).ToList());
+            if (allSettings.Count == 0)
+                return null;
+
+            var effectiveValues = JObject.Parse("{}");
+            if (allSettings.Count > 0)
+            {
+                allSettings.Reverse();
+                foreach (var settings in allSettings)
+                    if (await IsCurrentUserInRoleAsync(SettingsRole.Reader, settingsName, settings, null, null, cancel))
+                        effectiveValues.Merge(settings.BinaryAsJObject, MergeControl);
+            }
+
+            return effectiveValues;
+        }
+
 
         // ================================================================================= Settings API (INSTANCE)
 
@@ -413,7 +457,7 @@ namespace SenseNet.ContentRepository
             // try json format
             // only return the result if the key was found in the JSON text
             var jsonToken = BinaryAsJObject?[key];
-            if (jsonToken != null)
+            if (jsonToken != null && jsonToken.Type != JTokenType.Null)
             {
                 found = true;
                 return this.GetValueFromJsonInternal<T>(jsonToken, key);
@@ -543,24 +587,38 @@ namespace SenseNet.ContentRepository
             }
         }
 
-        /// <inheritdoc />
+        [Obsolete("Use async version instead.", true)]
         public override void Save(NodeSaveSettings settings)
+        {
+            SaveAsync(settings, CancellationToken.None).GetAwaiter().GetResult();
+        }
+        public override async System.Threading.Tasks.Task SaveAsync(NodeSaveSettings settings, CancellationToken cancel)
         {
             AssertSettings();
 
             if (_dynamicFieldsChanged && BinaryAsJObject != null)
             {
                 // If this is a JSON settings file and the dynamic metadata changed, save the JSON binary according to the changes
-                JsonDynamicFieldHelper.SaveToStream(BinaryAsJObject, stream =>
+                await JsonDynamicFieldHelper.SaveToStreamAsync(BinaryAsJObject, async (stream, c) =>
                 {
                     this.Binary.SetStream(stream);
-                    base.Save(settings);
+                    await base.SaveAsync(settings, c);
                     _dynamicFieldsChanged = false;
-                });
+                }, cancel);
             }
             else
             {
-                base.Save(settings);
+                await base.SaveAsync(settings, cancel).ConfigureAwait(false);
+            }
+
+            // Remove all items from cache on the parent settings chain
+            var allSettings = GetAllSettingsByName<Settings>(Name.Replace(".settings", ""), Path).ToList();
+            foreach (var item in allSettings)
+            {
+                item._jsonIsLoaded = false;
+                item._binaryAsJObject = null;
+                PathDependency.FireChanged(item.Path);
+                NodeIdDependency.FireChanged(item.Id);
             }
 
             // Find all settings that inherit from this setting and remove their cached data.
@@ -575,9 +633,10 @@ namespace SenseNet.ContentRepository
                 {
                     using (new SystemAccount())
                     {
-                        var q = ContentQuery.Query(SafeQueries.InTreeAndTypeIsAndName,
-                            new QuerySettings {EnableAutofilters = FilterStatus.Disabled},
-                            contextPath, typeof(Settings).Name, this.Name);
+                        var q = await ContentQuery.QueryAsync(SafeQueries.InTreeAndTypeIsAndName,
+                                new QuerySettings { EnableAutofilters = FilterStatus.Disabled }, cancel,
+                                contextPath, nameof(Settings), this.Name)
+                            .ConfigureAwait(false);
 
                         foreach (var id in q.Identifiers)
                             NodeIdDependency.FireChanged(id);
@@ -642,20 +701,22 @@ namespace SenseNet.ContentRepository
             
             var nameError = false;
             var globalSettingError = false;
-            if (SearchManager.ContentQueryIsAllowed)
+            if (Providers.Instance.SearchManager.ContentQueryIsAllowed)
             {
-                if (ContentQuery.Query(SafeQueries.SettingsByNameAndSubtree, null, name, id, rootpath).Count > 0)
+                if (ContentQuery.QueryAsync(SafeQueries.SettingsByNameAndSubtree, null, CancellationToken.None, name, id, rootpath)
+                        .ConfigureAwait(false).GetAwaiter().GetResult().Count > 0)
                     nameError = true;
 
                 // check global settings only if this is a local setting
                 if (!nameError &&
                     !path.StartsWith(SETTINGSCONTAINERPATH + RepositoryPath.PathSeparator, StringComparison.InvariantCulture) &&
-                    ContentQuery.Query(SafeQueries.SettingsGlobalOnly, null, name, SETTINGSCONTAINERPATH).Count > 0)
+                    ContentQuery.QueryAsync(SafeQueries.SettingsGlobalOnly, null, CancellationToken.None, name, SETTINGSCONTAINERPATH)
+                        .ConfigureAwait(false).GetAwaiter().GetResult().Count > 0)
                     globalSettingError = true;
             }
             else
             {
-                var settingsType = ActiveSchema.NodeTypes["Settings"];
+                var settingsType = Providers.Instance.StorageSchema.NodeTypes["Settings"];
 
                 // query content without outer search engine
                 var nqResult = NodeQuery.QueryNodesByTypeAndPathAndName(settingsType, false, rootpath, false, name);

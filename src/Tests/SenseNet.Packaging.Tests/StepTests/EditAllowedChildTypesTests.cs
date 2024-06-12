@@ -3,7 +3,8 @@ using System.Text;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using SenseNet.Packaging.Steps;
 using SenseNet.Packaging.Tests.Implementations;
-using SenseNet.Tests;
+using SenseNet.Testing;
+using SenseNet.Tests.Core;
 
 namespace SenseNet.Packaging.Tests.StepTests
 {
@@ -17,12 +18,12 @@ namespace SenseNet.Packaging.Tests.StepTests
             // preparing logger
             _log = new StringBuilder();
             var loggers = new[] { new PackagingTestLogger(_log) };
-            var loggerAcc = new PrivateType(typeof(Logger));
+            var loggerAcc = new TypeAccessor(typeof(Logger));
             loggerAcc.SetStaticField("_loggers", loggers);
         }
 
-        [TestMethod]
-        public void Step_EditAllowedChildTypes_0Orig_0New_0Old()
+        [TestMethod, TestCategory("Services")]
+        public void Step_EditAllowedChildTypes_0Orig_0New_0Old_CSrv()
         {
             var result = EditAllowedChildTypes.GetEditedList(new string[0], null, null);
             Assert.AreEqual(0, result.Length);

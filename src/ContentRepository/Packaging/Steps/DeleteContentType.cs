@@ -2,14 +2,19 @@
 using System.Collections.Generic;
 using System.Data;
 using System.Linq;
+using System.Threading;
 using System.Xml;
+using Microsoft.Extensions.DependencyInjection;
+using SenseNet.Configuration;
 using SenseNet.ContentRepository;
 using SenseNet.ContentRepository.Fields;
 using SenseNet.ContentRepository.Schema;
 using SenseNet.ContentRepository.Storage;
 using SenseNet.ContentRepository.Storage.Data;
+using SenseNet.ContentRepository.Storage.Data.MsSqlClient;
 using SenseNet.ContentRepository.Storage.Security;
 using SenseNet.Search;
+using Task = System.Threading.Tasks.Task;
 
 // ReSharper disable PossibleNullReferenceException
 
@@ -89,12 +94,13 @@ namespace SenseNet.Packaging.Steps
                 }
 
                 if (dependencies.InstanceCount > 0)
-                    DeleteInstances(rootTypeNames);
-                DeleteRelatedItems(dependencies);
+                    DeleteInstancesAsync(rootTypeNames, CancellationToken.None).ConfigureAwait(false).GetAwaiter().GetResult();
+                DeleteRelatedItemsAsync(dependencies, CancellationToken.None).ConfigureAwait(false).GetAwaiter().GetResult();
                 RemoveAllowedTypes(dependencies);
 
                 foreach (var rootTypeName in rootTypeNames)
-                    ContentTypeInstaller.RemoveContentType(rootTypeName);
+                    ContentTypeInstaller.RemoveContentTypeAsync(rootTypeName, CancellationToken.None)
+                        .ConfigureAwait(false).GetAwaiter().GetResult();
 
                 Logger.LogMessage($"The content type{(plural ? "s are" : " is")} successfuly removed.");
             }
@@ -125,7 +131,8 @@ namespace SenseNet.Packaging.Steps
             {
                 var typeSubtreeQuery = ContentQuery.CreateQuery(ContentRepository.SafeQueries.InTree,
                     QuerySettings.AdminSettings, ContentType.GetByName(rootTypeName).Path);
-                var typeSubtreeResult = typeSubtreeQuery.Execute();
+                var typeSubtreeResult = typeSubtreeQuery.ExecuteAsync(CancellationToken.None)
+                    .ConfigureAwait(false).GetAwaiter().GetResult();
                 typeNames.AddRange(typeSubtreeResult.Nodes.Select(n => n.Name));
                 inheritedTypeNames.AddRange(typeNames.Except(rootTypeNames));
             }
@@ -133,13 +140,18 @@ namespace SenseNet.Packaging.Steps
             var relatedFolders = GetRelatedFolders(typeNames);
 
             var contentInstancesCount = ContentQuery.CreateQuery(
-                                            ContentRepository.SafeQueries.TypeIsCountOnly,
-                                            QuerySettings.AdminSettings, new object[] { rootTypeNames }).Execute().Count
+                                                ContentRepository.SafeQueries.TypeIsCountOnly,
+                                                QuerySettings.AdminSettings, new object[] {rootTypeNames})
+                                            .ExecuteAsync(CancellationToken.None)
+                                            .ConfigureAwait(false).GetAwaiter().GetResult()
+                                            .Count
                                         -
-                                        relatedFolders.ContentTemplates.Select(p => ContentQuery.Query(
-                                            ContentRepository.SafeQueries.InTreeAndTypeIsCountOnly,
-                                            QuerySettings.AdminSettings, p, typeNames).Count).Sum();
+                                        relatedFolders.ContentTemplates.Select(p => ContentQuery.QueryAsync(
+                                                ContentRepository.SafeQueries.InTreeAndTypeIsCountOnly,
+                                                QuerySettings.AdminSettings, CancellationToken.None, p, typeNames)
+                                            .ConfigureAwait(false).GetAwaiter().GetResult().Count).Sum();
 
+            var PDP = Providers.Instance.Services.GetRequiredService<IPackagingDataProvider>();
             var result = new ContentTypeDependencies
             {
                 ContentTypeNames = rootTypeNames,
@@ -152,7 +164,7 @@ namespace SenseNet.Packaging.Steps
                 // ContentType/Fields/Field/Configuration/AllowedTypes/Type: "Folder"
                 PermittingFieldSettings = GetContentTypesWhereTheyAreAllowedInReferenceField(typeNames),
                 // ContentMetaData/Fields/AllowedChildTypes: "Folder File"
-                PermittingContentCollection = GetContentPathsWhereTheyAreAllowedChildren(typeNames),
+                PermittingContentCollection = PDP.GetContentPathsWhereTheyAreAllowedChildren(typeNames),
 
                 Applications = relatedFolders.Applications,
                 ContentTemplates = relatedFolders.ContentTemplates,
@@ -176,49 +188,11 @@ namespace SenseNet.Packaging.Steps
                 .Distinct()
                 .ToArray();
         }
-        private Dictionary<string, string> GetContentPathsWhereTheyAreAllowedChildren(List<string> names)
-        {
-            var result = new Dictionary<string, string>();
-
-            var whereClausePart = string.Join(Environment.NewLine + "    OR" + Environment.NewLine,
-                names.Select(n =>
-                    $"    (t.Value like '{n}' OR t.Value like '% {n} %' OR t.Value like '{n} %' OR t.Value like '% {n}')"));
-
-            // testability: the first line is recognizable for the tests.
-            var sql = $"-- GetContentPathsWhereTheyAreAllowedChildren: [{string.Join(", ", names)}]" +
-                      Environment.NewLine;
-            sql += @"SELECT n.Path, t.Value FROM TextPropertiesNVarchar t
-	JOIN SchemaPropertyTypes p ON p.PropertyTypeId = t.PropertyTypeId
-	JOIN Versions v ON t.VersionId = v.VersionId
-	JOIN Nodes n ON n.NodeId = v.NodeId
-WHERE p.Name = 'AllowedChildTypes' AND (
-" + whereClausePart + @"
-)
-UNION ALL
-SELECT n.Path, t.Value FROM TextPropertiesNText t
-	JOIN SchemaPropertyTypes p ON p.PropertyTypeId = t.PropertyTypeId
-	JOIN Versions v ON t.VersionId = v.VersionId
-	JOIN Nodes n ON n.NodeId = v.NodeId
-WHERE p.Name = 'AllowedChildTypes' AND (
-" + whereClausePart + @"
-)
-";
-
-            using (var cmd = DataProvider.Instance.CreateDataProcedure(sql))
-            {
-                cmd.CommandType = CommandType.Text;
-                using (var reader = cmd.ExecuteReader())
-                    while (reader.Read())
-                        result.Add(reader.GetString(0), reader.GetString(1));
-            }
-
-            return result;
-        }
 
         private RelatedSensitiveFolders GetRelatedFolders(List<string> names)
         {
-            var result = ContentQuery.Query(ContentRepository.SafeQueries.TypeIsAndName, QuerySettings.AdminSettings,
-                "Folder", names);
+            var result = ContentQuery.QueryAsync(ContentRepository.SafeQueries.TypeIsAndName, QuerySettings.AdminSettings,
+                CancellationToken.None, "Folder", names).ConfigureAwait(false).GetAwaiter().GetResult();
 
             var apps = new List<string>();
             var temps = new List<string>();
@@ -311,41 +285,42 @@ WHERE p.Name = 'AllowedChildTypes' AND (
             }
         }
 
-        private void DeleteInstances(string[] contentTypeNames)
+        private async Task DeleteInstancesAsync(string[] contentTypeNames, CancellationToken cancel)
         {
             var result = ContentQuery.CreateQuery(
                     ContentRepository.SafeQueries.TypeIs, QuerySettings.AdminSettings, new object[] { contentTypeNames })
-                .Execute();
+                .ExecuteAsync(CancellationToken.None)
+                .ConfigureAwait(false).GetAwaiter().GetResult();
 
             Logger.LogMessage($"Deleting {result.Count} content by matching content type{(contentTypeNames.Length > 1 ? "s" : "")}.");
 
             foreach (var node in result.Nodes)
             {
                 Logger.LogMessage($"    {node.Path}");
-                node.ForceDelete();
+                await node.ForceDeleteAsync(cancel);
             }
         }
-        private void DeleteRelatedItems(ContentTypeDependencies dependencies)
+        private async Task DeleteRelatedItemsAsync(ContentTypeDependencies dependencies, CancellationToken cancel)
         {
             if (dependencies.Applications.Length > 0)
             {
                 Logger.LogMessage("Deleting applications...");
                 foreach (var node in dependencies.Applications.Select(Node.LoadNode).Where(n => n != null))
-                    node.ForceDelete();
+                    await node.ForceDeleteAsync(cancel);
                 Logger.LogMessage("Ok.");
             }
             if (dependencies.ContentTemplates.Length > 0)
             {
                 Logger.LogMessage("Deleting content templates...");
                 foreach (var node in dependencies.ContentTemplates.Select(Node.LoadNode).Where(n => n != null))
-                    node.ForceDelete();
+                    await node.ForceDeleteAsync(cancel);
                 Logger.LogMessage("Ok.");
             }
             if (dependencies.ContentViews.Length > 0)
             {
                 Logger.LogMessage("Deleting content views...");
                 foreach (var node in dependencies.ContentViews.Select(Node.LoadNode).Where(n => n != null))
-                    node.ForceDelete();
+                    await node.ForceDeleteAsync(cancel);
                 Logger.LogMessage("Ok.");
             }
         }
@@ -424,7 +399,7 @@ WHERE p.Name = 'AllowedChildTypes' AND (
                                     newList.Add(ct);
 
                             gc.AllowedChildTypes = newList;
-                            gc.Save();
+                            gc.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
                         }
                     }
                 }

@@ -2,6 +2,10 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.Serialization;
+using System.Threading;
+using Newtonsoft.Json;
+using SenseNet.Configuration;
+using STT=System.Threading.Tasks;
 using SenseNet.ContentRepository.Storage.Data;
 using SenseNet.Diagnostics;
 // ReSharper disable ArrangeThisQualifier
@@ -65,6 +69,7 @@ namespace SenseNet.ContentRepository.Search.Indexing.Activities
         [NonSerialized]
         private bool _isUnprocessedActivity;
         /// <inheritdoc cref="IIndexingActivity.IsUnprocessedActivity"/>
+        [JsonIgnore]
         public bool IsUnprocessedActivity
         {
             get => _isUnprocessedActivity;
@@ -76,6 +81,7 @@ namespace SenseNet.ContentRepository.Search.Indexing.Activities
         /// <summary>
         /// Gets or sets a value that is true if the activity is received from a messaging channel.
         /// </summary>
+        [JsonIgnore]
         public bool FromReceiver
         {
             get => _fromReceiver;
@@ -87,6 +93,7 @@ namespace SenseNet.ContentRepository.Search.Indexing.Activities
         /// <summary>
         /// Gets or sets a value that is true if the activity is loaded from the database.
         /// </summary>
+        [JsonIgnore]
         public bool FromDatabase
         {
             get => _fromDatabase;
@@ -95,6 +102,7 @@ namespace SenseNet.ContentRepository.Search.Indexing.Activities
 
         [NonSerialized]
         private bool _executed;
+        [JsonIgnore]
         internal bool Executed
         {
             get => _executed;
@@ -102,7 +110,7 @@ namespace SenseNet.ContentRepository.Search.Indexing.Activities
         }
 
 
-        internal override void ExecuteIndexingActivity()
+        internal override async STT.Task ExecuteIndexingActivityAsync(CancellationToken cancellationToken)
         {
             // if not running or paused, skip execution except executing unprocessed activities
             if (!IsExecutable())
@@ -115,7 +123,7 @@ namespace SenseNet.ContentRepository.Search.Indexing.Activities
             bool successful;
             try
             {
-                successful = ProtectedExecute();
+                successful = await ProtectedExecuteAsync(cancellationToken).ConfigureAwait(false);
             }
             catch (SerializationException)
             {
@@ -140,18 +148,20 @@ namespace SenseNet.ContentRepository.Search.Indexing.Activities
         private bool IsExecutable()
         {
             // if not running or paused, skip execution except executing unprocessed activities
-            return IsUnprocessedActivity || IndexManager.Running;
+            return IsUnprocessedActivity || Providers.Instance.IndexManager.Running;
         }
 
         /// <summary>
         /// Defines the customizable method to reach the activity's main goal.
         /// </summary>
-        /// <returns></returns>
-        protected abstract bool ProtectedExecute();
+        /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
+        /// <returns>A Task that represents the asynchronous operation.</returns>
+        protected abstract STT.Task<bool> ProtectedExecuteAsync(CancellationToken cancellationToken);
         
         [NonSerialized]
         private IndexingActivityBase _attachedActivity;
 
+        [JsonIgnore]
         internal IndexingActivityBase AttachedActivity
         {
             get => _attachedActivity;
@@ -181,12 +191,12 @@ namespace SenseNet.ContentRepository.Search.Indexing.Activities
         {
             if (AttachedActivity != null)
             {
-                SnTrace.IndexQueue.Write("Attached IndexingActivity A{0} finished.", AttachedActivity.Id);
+                SnTrace.IndexQueue.Write("Attached IndexingActivity finished: A{0}.", AttachedActivity.Id);
                 // finalize attached activities first
                 AttachedActivity.Finish();
             }
             base.Finish();
-            SnTrace.IndexQueue.Write("IndexingActivity A{0} finished.", Id);
+            SnTrace.IndexQueue.Write("IndexingActivity finished: A{0}.", Id);
         }
 
 
@@ -217,6 +227,7 @@ namespace SenseNet.ContentRepository.Search.Indexing.Activities
         /// Gets the indexing activities that block this instance.
         /// Used when the current indexing engine uses local index.
         /// </summary>
+        [JsonIgnore]
         public List<IndexingActivityBase> WaitingFor => _waitingFor;
 
         [NonSerialized]
@@ -225,6 +236,7 @@ namespace SenseNet.ContentRepository.Search.Indexing.Activities
         /// Gets the indexing activities that are blocked by this instance.
         /// Used when the current indexing engine uses local index.
         /// </summary>
+        [JsonIgnore]
         public List<IndexingActivityBase> WaitingForMe => _waitingForMe;
 
 

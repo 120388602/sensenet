@@ -1,6 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.AspNetCore.Http;
 using SenseNet.ContentRepository.Storage;
 using SenseNet.ContentRepository.Storage.Data;
 using SenseNet.ContentRepository.Schema;
@@ -247,7 +250,7 @@ namespace SenseNet.ContentRepository
         /// This method is obsolete. Use <see cref="Group.IsInGroup"/> instead.
         /// </summary>
         /// <param name="securityGroupId">Id of the container group.</param>
-        [Obsolete("Use IsInGroup instead.", false)]
+        [Obsolete("Use IsInGroup instead.", true)]
         public bool IsInRole(int securityGroupId)
         {
             return IsInGroup(securityGroupId);
@@ -260,7 +263,7 @@ namespace SenseNet.ContentRepository
         /// <param name="securityGroupId">Id of the container group.</param>
         public bool IsInGroup(int securityGroupId)
         {
-            return SecurityHandler.IsInGroup(this.Id, securityGroupId);
+            return Providers.Instance.SecurityHandler.IsInGroup(this.Id, securityGroupId);
         }
 
         /// <summary>
@@ -280,7 +283,7 @@ namespace SenseNet.ContentRepository
 
             this.AddReference(MEMBERS, groupNode);
 
-            Save();
+            SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
         }
 
         /// <summary>
@@ -300,7 +303,7 @@ namespace SenseNet.ContentRepository
 
             this.AddReference(MEMBERS, userNode);
 
-            Save();
+            SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
         }
 
         /// <summary>
@@ -320,7 +323,7 @@ namespace SenseNet.ContentRepository
 
             this.RemoveReference(MEMBERS, groupNode);
 
-            Save();
+            SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
         }
 
         /// <summary>
@@ -340,7 +343,7 @@ namespace SenseNet.ContentRepository
 
             this.RemoveReference(MEMBERS, userNode);
 
-            Save();
+            SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
         }
 
         private void AssertSpecialGroup(string msg)
@@ -353,13 +356,20 @@ namespace SenseNet.ContentRepository
 
         /// <inheritdoc />
         /// <remarks>Synchronizes the modifications via the current <see cref="DirectoryProvider"/>.</remarks>
+        [Obsolete("Use async version instead.", true)]
         public override void Save(NodeSaveSettings settings)
+        {
+            SaveAsync(settings, CancellationToken.None).GetAwaiter().GetResult();
+        }
+        /// <inheritdoc />
+        /// <remarks>Synchronizes the modifications via the current <see cref="DirectoryProvider"/>.</remarks>
+        public override async System.Threading.Tasks.Task SaveAsync(NodeSaveSettings settings, CancellationToken cancel)
         {
             AssertValidMembers();
 
             var originalId = this.Id;
 
-            base.Save(settings);
+            await base.SaveAsync(settings, cancel).ConfigureAwait(false);
 
             // AD Sync
             if (_syncObject)
@@ -372,15 +382,22 @@ namespace SenseNet.ContentRepository
 
         /// <inheritdoc />
         /// <remarks>Synchronizes the deletion via the current <see cref="DirectoryProvider"/>.</remarks>
+        [Obsolete("Use async version instead", true)]
         public override void ForceDelete()
         {
-            base.ForceDelete();
+            ForceDeleteAsync(CancellationToken.None).ConfigureAwait(false).GetAwaiter().GetResult();
+        }
+        /// <inheritdoc />
+        /// <remarks>Synchronizes the deletion via the current <see cref="DirectoryProvider"/>.</remarks>
+        public override async System.Threading.Tasks.Task ForceDeleteAsync(CancellationToken cancel)
+        {
+            await base.ForceDeleteAsync(cancel);
 
             // AD Sync
-            var ADProvider = DirectoryProvider.Current;
-            if (ADProvider != null)
+            var adProvider = DirectoryProvider.Current;
+            if (adProvider != null)
             {
-                ADProvider.DeleteADObject(this);
+                adProvider.DeleteADObject(this);
             }
         }
 
@@ -439,11 +456,14 @@ namespace SenseNet.ContentRepository
         /// Adds the specified items to the members list of the given group <see cref="Content"/>.
         /// If the content is not a <see cref="Group"/>, an <see cref="InvalidOperationException"/> will be thrown.
         /// </summary>
+        /// <snCategory>Users and Groups</snCategory>
         /// <param name="content">A <see cref="Content"/> that should be a <see cref="Group"/>.</param>
         /// <param name="contentIds">An array of contentIds that represents the new members.</param>
         /// <returns></returns>
         [ODataAction]
-        public static object AddMembers(Content content, int[] contentIds)
+        [ContentTypes(N.CT.Group)]
+        [AllowedRoles(N.R.Everyone)]
+        public static async Task<object> AddMembers(Content content, HttpContext httpContext, int[] contentIds)
         {
             RepositoryTools.AssertArgumentNull(content, "content");
             RepositoryTools.AssertArgumentNull(contentIds, "contentIds");
@@ -456,7 +476,7 @@ namespace SenseNet.ContentRepository
 
             // add the provided reference nodes
             group.AddReferences<Node>(MEMBERS, Node.LoadNodes(contentIds));
-            group.Save();
+            await group.SaveAsync(httpContext.RequestAborted).ConfigureAwait(false);
 
             return null;
         }
@@ -464,10 +484,13 @@ namespace SenseNet.ContentRepository
         /// <summary>
         /// Removes the specified items from the members list of the given group <see cref="Content"/>.
         /// </summary>
+        /// <snCategory>Users and Groups</snCategory>
         /// <param name="content">A <see cref="Content"/> that should be a <see cref="Group"/>.</param>
         /// <param name="contentIds">An array of contentIds that represents the members to remove.</param>
         /// <returns></returns>
         [ODataAction]
+        [ContentTypes(N.CT.Group)]
+        [AllowedRoles(N.R.Everyone)]
         public static object RemoveMembers(Content content, int[] contentIds)
         {
             RepositoryTools.AssertArgumentNull(content, "content");
@@ -482,7 +505,7 @@ namespace SenseNet.ContentRepository
             // remove all the provided referenced nodes
             Node.LoadNodes(contentIds).ForEach(refNode => group.RemoveReference(MEMBERS, refNode));
 
-            group.Save();
+            group.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
 
             return null;
         }
@@ -525,14 +548,57 @@ namespace SenseNet.ContentRepository
             {
                 var parent = GroupMembershipObserver.GetFirstOrgUnitParent(e.SourceNode);
                 if (parent != null)
-                    SecurityHandler.AddGroupsToGroup(parent.Id, new[] { e.SourceNode.Id });
+                    Providers.Instance.SecurityHandler.AddGroupsToGroupAsync(parent.Id, new[] { e.SourceNode.Id },
+                        CancellationToken.None).GetAwaiter().GetResult();
             }
 
             var usersToAdd = GetMemberUsers().Select(u => u.Id).ToArray();
             var groupsToAdd = GetMemberGroups().Select(g => g.Id).ToArray();
 
             if (usersToAdd.Length > 0 || groupsToAdd.Length > 0)
-                SecurityHandler.AddMembers(this.Id, usersToAdd, groupsToAdd);
+                Providers.Instance.SecurityHandler.AddMembersAsync(this.Id, usersToAdd, groupsToAdd,
+                    CancellationToken.None).GetAwaiter().GetResult();
+        }
+
+        protected override void OnModifying(object sender, CancellableNodeEventArgs e)
+        {
+            base.OnModifying(sender, e);
+
+            // has the Members field changed?
+            var changedMembers = e.ChangedData.FirstOrDefault(cd => cd.Name == nameof(Members));
+            if (changedMembers == null)
+                return;
+
+            // is this group protected?
+            if (!Providers.Instance.ContentProtector.GetProtectedGroupIds().Contains(e.SourceNode.Id))
+                return;
+
+            // Protected groups must contain at least one direct member user
+            // who is enabled. Transitivity does not count, the user must be
+            // a direct member.
+
+            // If there were no members in the group, we can't remove anybody. This
+            // is probably an initial import scenario.
+            var oldMembersText = (string)changedMembers.Original;
+            if (string.IsNullOrEmpty(oldMembersText))
+                return;
+
+            // there has to be at least one member in the group
+            var newMembersText = (string) changedMembers.Value;
+            var newMemberIds = string.IsNullOrEmpty(newMembersText) 
+                ? Array.Empty<int>() 
+                : newMembersText.Split(',').Select(int.Parse).ToArray();
+            if (!newMemberIds.Any())
+                throw new InvalidOperationException($"{Name} is a protected group. " +
+                                                    "It has to contain at least one member.");
+
+            using (new SystemAccount())
+            {
+                // at least one Enabled member has to remain in the group
+                if (!LoadNodes(newMemberIds).Any(User.IsEnabledRegularUser))
+                    throw new InvalidOperationException($"{Name} is a protected group. " +
+                                                        "It has to contain at least one enabled member.");
+            }
         }
 
         /// <summary>
@@ -567,8 +633,9 @@ namespace SenseNet.ContentRepository
             var removedIdentities = oldMembers.Except(newMembers);
 
             // I chose collecting arrays over LINQ here because this way we enumerate and load nodeheads only once
-            var ntUser = ActiveSchema.NodeTypes["User"];
-            var ntGroup = ActiveSchema.NodeTypes["Group"];
+            var schema = Providers.Instance.StorageSchema;
+            var ntUser = schema.NodeTypes["User"];
+            var ntGroup = schema.NodeTypes["Group"];
             var usersToAdd = new List<int>();
             var usersToRemove = new List<int>();
             var groupsToAdd = new List<int>();
@@ -593,9 +660,11 @@ namespace SenseNet.ContentRepository
             }
 
             if (usersToRemove.Count > 0 || groupsToRemove.Count > 0)
-                SecurityHandler.RemoveMembers(this.Id, usersToRemove, groupsToRemove);
+                Providers.Instance.SecurityHandler.RemoveMembersAsync(this.Id, usersToRemove, groupsToRemove,
+                    CancellationToken.None).GetAwaiter().GetResult();
             if (usersToAdd.Count > 0 || groupsToAdd.Count > 0)
-                SecurityHandler.AddMembers(this.Id, usersToAdd, groupsToAdd);
+                Providers.Instance.SecurityHandler.AddMembersAsync(this.Id, usersToAdd, groupsToAdd,
+                    CancellationToken.None).GetAwaiter().GetResult();
         }
 
         // =================================================================================== IADSyncable Members
@@ -613,7 +682,7 @@ namespace SenseNet.ContentRepository
             // update object without syncing to AD
             _syncObject = false;
 
-            this.Save();
+            this.SaveAsync(CancellationToken.None).GetAwaiter().GetResult();
         }
     }
 }

@@ -4,10 +4,12 @@ using IO = System.IO;
 using System.Linq;
 using SenseNet.ContentRepository.Storage;
 using System.Reflection;
+using System.Threading;
 using SenseNet.Communication.Messaging;
 using SenseNet.Diagnostics;
 using SenseNet.Packaging;
 using SenseNet.Tools;
+using STT = System.Threading.Tasks;
 
 namespace SenseNet.ContentRepository
 {
@@ -15,13 +17,14 @@ namespace SenseNet.ContentRepository
     {
         public AssemblyInfo[] SenseNet { get; set; }
         public AssemblyInfo[] Plugins { get; set; }
+        // ReSharper disable once InconsistentNaming
         public AssemblyInfo[] GAC { get; set; }
         public AssemblyInfo[] Other { get; set; }
         public AssemblyInfo[] Dynamic { get; set; }
     }
     public class RepositoryVersionInfo
     {
-        public IEnumerable<ComponentInfo> Components { get; private set; }
+        public IEnumerable<SnComponentDescriptor> Components { get; private set; }
         public AssemblyDetails Assemblies { get; private set; }
         public IEnumerable<Package> InstalledPackages{ get; private set;}
         public bool DatabaseAvailable { get; private set; }
@@ -30,7 +33,7 @@ namespace SenseNet.ContentRepository
 
         private static readonly RepositoryVersionInfo BeforeInstall = new RepositoryVersionInfo
         {
-            Components = new ComponentInfo[0],
+            Components = new SnComponentDescriptor[0],
             InstalledPackages = new Package[0],
             Assemblies = new AssemblyDetails
             {
@@ -43,36 +46,39 @@ namespace SenseNet.ContentRepository
             DatabaseAvailable = false
         };
 
+        // ReSharper disable once InconsistentNaming
         private static RepositoryVersionInfo __instance;
-        private static object _instanceLock = new object();
+        private static readonly object InstanceLock = new object();
         public static RepositoryVersionInfo Instance
         {
             get
             {
                 if (__instance == null)
-                    lock (_instanceLock)
+                    lock (InstanceLock)
                         if (__instance == null)
-                            __instance = Create();
+                            __instance = Create(CancellationToken.None);
                 return __instance;
             }
         }
 
-        private static RepositoryVersionInfo Create()
+        internal static RepositoryVersionInfo Create(CancellationToken cancellationToken)
         {
             var storage = PackageManager.Storage;
             try
             {
-                return Create(
-                    storage.LoadInstalledComponents(),
-                    storage.LoadInstalledPackages());
+                var t1 = storage.LoadInstalledComponentsAsync(cancellationToken);
+                var t2 = storage.LoadInstalledPackagesAsync(cancellationToken);
+                STT.Task.WaitAll(t1, t2);
+
+                return Create(t1.GetAwaiter().GetResult(), t2.GetAwaiter().GetResult());
             }
             catch
             {
-                return RepositoryVersionInfo.BeforeInstall;
+                return BeforeInstall;
             }
         }
 
-        private static RepositoryVersionInfo Create(IEnumerable<ComponentInfo> componentVersions, IEnumerable<Package> packages, bool databaseAvailable = true)
+        internal static RepositoryVersionInfo Create(IEnumerable<ComponentInfo> componentVersions, IEnumerable<Package> packages, bool databaseAvailable = true)
         {
             var asms = TypeHandler.GetAssemblyInfo();
 
@@ -81,7 +87,8 @@ namespace SenseNet.ContentRepository
 
             var asmDyn = asms.Where(a => a.IsDynamic).ToArray();
             asms = asms.Except(asmDyn).ToArray();
-            var asmInBin = asms.Where(a => a.CodeBase.StartsWith(binPath)).ToArray();
+            var asmInBin = asms.Where(a => a.CodeBase.StartsWith(binPath ??
+                throw new InvalidOperationException($"Parameter cannot be null."))).ToArray();
             asms = asms.Except(asmInBin).ToArray();
             var asmInGac = asms.Where(a => a.CodeBase.Contains("\\GAC")).ToArray();
             asms = asms.Except(asmInGac).ToArray();
@@ -89,9 +96,16 @@ namespace SenseNet.ContentRepository
             var asmSn = asmInBin.Where(a => a.Name.StartsWith("SenseNet.")).ToArray();
             var plugins = asmInBin.Except(asmSn).ToArray();
 
+            var components = componentVersions.Select(c => new SnComponentDescriptor(c)).ToArray();
+
+            var pkgArray = packages?.ToArray();
+            if(pkgArray != null)
+                foreach (var package in pkgArray)
+                    package.Manifest = null;
+
             return new RepositoryVersionInfo
             {
-                Components = componentVersions,
+                Components = components,
                 Assemblies = new AssemblyDetails
                 {
                     SenseNet = asmSn,
@@ -100,14 +114,18 @@ namespace SenseNet.ContentRepository
                     Other = asms,
                     Dynamic = asmDyn,
                 },
-                InstalledPackages = packages,
+                InstalledPackages = pkgArray,
                 DatabaseAvailable = databaseAvailable
             };
         }
 
-        public static void Reset()
+        public static void Reset(bool skipDistribution = false)
         {
-            new RepositoryVersionInfoResetDistributedAction().Execute();
+            if (skipDistribution)
+                ResetPrivate();
+            else
+                new RepositoryVersionInfoResetDistributedAction()
+                    .ExecuteAsync(CancellationToken.None).GetAwaiter().GetResult();
         }
         private static void ResetPrivate()
         {
@@ -117,26 +135,28 @@ namespace SenseNet.ContentRepository
         [Serializable]
         internal sealed class RepositoryVersionInfoResetDistributedAction : DistributedAction
         {
-            public override void DoAction(bool onRemote, bool isFromMe)
+            public override string TraceMessage => null;
+
+            public override STT.Task DoActionAsync(bool onRemote, bool isFromMe, CancellationToken cancellationToken)
             {
                 if (onRemote && isFromMe)
-                    return;
-                RepositoryVersionInfo.ResetPrivate();
+                    return STT.Task.CompletedTask;
+                ResetPrivate();
+
+                return STT.Task.CompletedTask;
             }
         }
 
         public static void CheckComponentVersions()
         {
-            var components = TypeResolver.GetTypesByInterface(typeof(ISnComponent)).Where(vct => !vct.IsAbstract)
-                .Select(t => TypeResolver.CreateInstance(t.FullName) as ISnComponent)
-                .Where(c => c != null)
-                .Select(SnComponentInfo.Create)
-                .ToArray();
+            var components = GetAssemblyComponents();
+
             CheckComponentVersions(components);
         }
         private static void CheckComponentVersions(SnComponentInfo[] components)
         {
 #if DEBUG
+            // ReSharper disable once IntroduceOptionalParameters.Local
             CheckComponentVersions(components, false);
 #else
             CheckComponentVersions(components, true);
@@ -199,6 +219,65 @@ namespace SenseNet.ContentRepository
 
             // Everything is fine, assembly is runnable.
             return true;
+        }
+
+        /// <summary>
+        /// Loads and instantiates all available ISnComponent types and returns them 
+        /// in the same order as they were installed in the database.
+        /// </summary>
+        internal static SnComponentInfo[] GetAssemblyComponents()
+        {
+            return TypeResolver.GetTypesByInterface(typeof(ISnComponent)).Where(vct => !vct.IsAbstract)
+                .Select(t =>
+                {
+                    ISnComponent component = null;
+
+                    try
+                    {
+                        component = TypeResolver.CreateInstance(t.FullName) as ISnComponent;
+                    }
+                    catch (Exception ex)
+                    {
+                        SnLog.WriteException(ex, $"Error during instantiating the component type {t.FullName}.");
+                    }
+
+                    return component;
+                })
+                .Where(c => c != null)
+                .OrderBy(c => c.ComponentId, new SnComponentComparer())
+                .Select(SnComponentInfo.Create)
+                .ToArray();
+        }
+
+        /// <summary>
+        /// Compares and sorts components loaded from the assemblies based on the order
+        /// found in the database. This is necessary to execute patches in the same
+        /// dependency order as they were installed.
+        /// </summary>
+        internal class SnComponentComparer : IComparer<string>
+        {
+            private readonly string[] _installedComponents;
+
+            internal SnComponentComparer(string[] installedComponents = null)
+            {
+                _installedComponents = installedComponents ?? 
+                                       Instance.Components.Select(ci => ci.ComponentId).ToArray();
+            }
+
+            public int Compare(string componentId1, string componentId2)
+            {
+                var idx1 = Array.FindIndex(_installedComponents, ic => string.Equals(ic, componentId1));
+                var idx2 = Array.FindIndex(_installedComponents, ic => string.Equals(ic, componentId2));
+
+                if (idx1 < 0 && idx2 < 0)
+                    return string.Compare(componentId1, componentId2, StringComparison.InvariantCultureIgnoreCase);
+                if (idx1 < 0)
+                    return 1;
+                if (idx2 < 0)
+                    return -1;
+
+                return idx1 < idx2 ? -1 : (idx1 == idx2 ? 0 : 1);
+            }
         }
     }
 }

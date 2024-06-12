@@ -2,14 +2,13 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+using System.Threading;
 using Newtonsoft.Json.Linq;
+using SenseNet.Configuration;
 using SenseNet.ContentRepository.Schema;
 using SenseNet.ContentRepository.Security.Cryptography;
 using SenseNet.ContentRepository.Storage;
 using SenseNet.ContentRepository.Storage.Events;
-using SenseNet.ContentRepository.Storage.Security;
 
 namespace SenseNet.ContentRepository.Security.ADSync
 {
@@ -30,17 +29,21 @@ namespace SenseNet.ContentRepository.Security.ADSync
 
         // ================================================================================= Overrides
 
+        [Obsolete("Use async version instead.", true)]
         public override void Save(NodeSaveSettings settings)
+        {
+            SaveAsync(settings, CancellationToken.None).GetAwaiter().GetResult();
+        }
+        public override async System.Threading.Tasks.Task SaveAsync(NodeSaveSettings settings, CancellationToken cancel)
         {
             var settingsObject = DeserializeToJObject(this.Binary.GetStream());
             if (settingsObject != null)
             {
                 ReplaceOrEncodePasswords(settingsObject);
-
                 this.Binary.SetStream(RepositoryTools.GetStreamFromString(settingsObject.ToString()));
             }
 
-            base.Save(settings);
+            await base.SaveAsync(settings, cancel).ConfigureAwait(false);
         }
 
         protected override void OnLoaded(object sender, NodeEventArgs e)
@@ -128,7 +131,8 @@ namespace SenseNet.ContentRepository.Security.ADSync
                 if (!string.IsNullOrEmpty(pw))
                 {
                     // the client provided a password, we have to encrypt it
-                    credentials["Password"] = CryptoServiceProvider.Encrypt(pw);
+                    var csp = Providers.Instance.GetProvider<ICryptoServiceProvider>();
+                    credentials["Password"] = csp.Encrypt(pw);
                 }
                 else
                 {
